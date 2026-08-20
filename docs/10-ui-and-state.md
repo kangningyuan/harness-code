@@ -2,7 +2,9 @@
 
 > 基于 `src/ink/App.tsx` (~743 行，UI 核心) + `src/ink/barGlyph.ts` (~30 行) 实际源码。这是用户最关心的文档——CLI 的 UI 交互细节（光标逻辑、logo 显示、信息显示、spinner、进度条、交互选择器等）全部在此。
 >
-> **关键事实：** harness-code UI 用**原生 Ink**（`useInput`/`useApp`/`render`/`Text`/`Box`/`Static`/`Newline`），**不**是定制 reconciler。**无** ScrollBox、**无** 鼠标处理、**无** Vim 模式、**无** 18 上下文快捷键系统、**无** 自研 pub/sub store / AppState。状态全在 `App` 组件的 `useState`/`useRef`，唯一的外部 pub/sub 是 `TodoWriteTool` 的模块级 store。
+> **关键事实：** harness-code UI 用**原生 Ink**（`useInput`/`useApp`/`render`/`Text`/`Box`/`Static`/`Newline`），**不**是定制 reconciler。**无** ScrollBox、**无** 鼠标处理、**无** Vim 模式、**无** 18 上下文快捷键系统、**无** AppState。状态全在 `App` 组件的 `useState`/`useRef`，唯一在用的外部 pub/sub 是 `TodoWriteTool` 的模块级 store。
+>
+> **关于 `src/state/store.ts`：** 该文件存在（极简 `createStore<T>` pub/sub，文件头自称 "docs §10.1.1"），但**未被任何代码 import（死代码）**。实际 UI 状态管理不依赖它。复现时可建该文件保留，或直接不建（不影响构建/运行）。
 
 ## 1. 状态管理
 
@@ -561,7 +563,7 @@ formatTotalCost(tracker): string   // 按模型分行: "  model: N in / N out / 
 
 ## 16. 已知边界 / 未实现项
 
-- **无** 自研 pub/sub store / AppState（~450 字段）/ `useSyncExternalStore` 选择器。状态全在 `App` 的 `useState`/`useRef`。
+- **无** AppState（~450 字段）/ `useSyncExternalStore` 选择器。状态全在 `App` 的 `useState`/`useRef`。`src/state/store.ts` 的 `createStore` 存在但未被任何代码 import（死代码）。
 - **无** 定制 Ink reconciler / ScrollBox / DOMElement 树 / 鼠标事件 / 悬停 / 超链接。
 - **无** Vim 模式（motions/operators/textObjects/点重复）。
 - **无** 18 上下文快捷键系统 / 和弦 / 热重载 / keybindings.json。

@@ -33,6 +33,14 @@
 
 > **关于 `gray-matter` / `lodash-es`：** 这两个在 `package.json` 里声明了依赖，但源码里**没有**直接 import（frontmatter 解析是手写的，见 `memdir/memdir.ts` 和 `skills/loadSkillsDir.ts`）。`tsup.config.ts` 的 `external` 列表里也没有它们。复现时保留依赖声明即可，不要为了"用上"而改写解析逻辑。
 
+> **必须创建的 shim 文件（构建关键）：** `src/shims/react-devtools-core.ts` 必须存在。Ink 会条件性地 import `react-devtools-core`（devtools 用，本项目不用），但该包**不在** `package.json` 依赖里。`tsup.config.ts` 用 esbuild alias 把 `react-devtools-core` 指向这个 no-op shim：
+> ```typescript
+> // src/shims/react-devtools-core.ts
+> export default undefined
+> export const connect = () => undefined
+> ```
+> `tsup.config.ts` 的 `external` 列表也含 `react-devtools-core`，且 `esbuildOptions.alias` 把它解析到 `resolve(__dirname, 'src/shims/react-devtools-core.ts')`。**不建这个 shim 文件，`npm run build` 会失败。** 复现时必须原样建此文件 + 对应的 `tsup.config.ts` alias 配置。
+
 ## 文档目录
 
 | 文档 | 内容 |
@@ -49,6 +57,7 @@
 | [10 - UI 与状态管理](./10-ui-and-state.md) | Ink REPL、光标逻辑、banner、spinner、进度条、交互选择器、成本追踪 |
 | [11 - 安全机制](./11-security-and-bash-safety.md) | Bash AST 安全分析、文件系统安全、受保护路径、读前写 |
 | [12 - 会话持久化](./12-session-bridge.md) | JSONL 会话存储、`/resume` `/history`、meta sidecar（**无远程桥接**） |
+| [13 - 测试](./13-testing.md) | vitest 配置、API 门控、测试范式、覆盖清单 |
 
 ## 核心概念速查
 
@@ -152,7 +161,7 @@ Agent 运行时，用户仍可输入：`/stop` 立即中断；其他 `/` 命令�
 12. **会话存储** → `services/session/`（JSONL + meta sidecar）
 13. **记忆** → `memdir/` + `services/extractMemories/`
 14. **UI** → `ink/App.tsx`（Ink REPL，光标/spinner/banner/进度条/选择器）+ `ink/barGlyph.ts`
-15. **Slash 命令** → `commands.ts`（21 个命令）
+15. **Slash 命令** → `commands.ts`（20 个命令）
 16. **入口** → `main.tsx`（Commander）+ `entrypoints/headless.ts`
 
 ## 项目来源与许可

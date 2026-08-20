@@ -34,7 +34,7 @@ harness-code 是一个运行在终端的 AI Coding Agent，核心架构分层如
 └─────────────────────────────────────────────────────────┘
 ```
 
-> **与 Claude Code 的关键差异：** harness-code **没有** 自研 pub/sub store / AppState（~450 字段）、**没有** 定制 Ink reconciler / ScrollBox / 鼠标处理、**没有** Vim 模式、**没有** 18 上下文快捷键系统、**没有** Swarm/Coordinator 多 Agent、**没有** Bridge 远程控制 / 遥测 / OAuth、**没有** WebSearch 工具、**没有** 插件系统。UI 用**原生** Ink（`useInput`/`useApp`/`render`），状态用 React `useState`。详见各篇文档末尾的"已知边界"。
+> **与 Claude Code 的关键差异：** harness-code **没有** AppState（~450 字段）/ `useSyncExternalStore` 选择器（`src/state/store.ts` 里有个极简 `createStore` 但**未被任何代码使用**，是死代码）、**没有** 定制 Ink reconciler / ScrollBox / 鼠标处理、**没有** Vim 模式、**没有** 18 上下文快捷键系统、**没有** Swarm/Coordinator 多 Agent、**没有** Bridge 远程控制 / 遥测 / OAuth、**没有** WebSearch 工具、**没有** 插件系统。UI 用**原生** Ink（`useInput`/`useApp`/`render`），状态用 React `useState`。详见各篇文档末尾的"已知边界"。
 
 ## 2. 技术栈
 
@@ -109,8 +109,11 @@ App.tsx useInput() / handleSubmit()   ← 光标编辑、history、slash 解析
 |------|------|
 | `src/main.tsx` (~176 行) | CLI 入口，Commander 命令注册，配置加载，headless/REPL 分支 |
 | `src/entrypoints/headless.ts` (~117 行) | `--print` 无 TUI 模式，流式输出到 stdout，支持 `stream-json` NDJSON |
+| `src/shims/react-devtools-core.ts` (~5 行) | **必须创建**：no-op shim，供 `tsup.config.ts` 的 esbuild alias 解析 `react-devtools-core`（Ink 条件 import，本项目不用 devtools；不建此文件构建失败）。内容：`export default undefined` + `export const connect = () => undefined` |
 
 > **注意：** 没有 `src/setup.ts`（环境初始化逻辑直接在 `main.tsx` 的 `action()` 里）。没有 SDK/print 独立入口——headless 即 print。
+>
+> **构建配置（`tsup.config.ts`，复现必须原样）：** 入口 `src/main.tsx`，ESM，`target: node18`，`banner.js: '#!/usr/bin/env node'`，`splitting: false`，`sourcemap: false`，`clean: true`，`minify: false`。`external` 列表（这些依赖不打进 bundle，运行时从 node_modules 解析）：`zod commander @modelcontextprotocol/sdk fast-glob gray-matter lodash-es ink react react-reconciler yoga-layout react-devtools-core`。`esbuildOptions.alias` 把 `react-devtools-core` → `src/shims/react-devtools-core.ts`（见上）。
 
 ### 4.2 核心 Agent 引擎
 
@@ -193,7 +196,7 @@ App.tsx useInput() / handleSubmit()   ← 光标编辑、history、slash 解析
 | 目录 | 职责 |
 |------|------|
 | `src/skills/loadSkillsDir.ts` (~143 行) | SKILL.md 加载（`~/.claude/skills` + `.claude/skills`）+ slash 解析 + 参数替换 |
-| `src/commands.ts` (~371 行) | 21 个内置 slash 命令注册表 |
+| `src/commands.ts` (~370 行) | 20 个内置 slash 命令注册表 |
 
 > **无插件系统**（`enabledPlugins` 在 settings 类型里声明，但无 `plugins/` 目录、无加载逻辑）。详见 [09-skills-and-plugins.md](./09-skills-and-plugins.md)。
 
@@ -203,8 +206,9 @@ App.tsx useInput() / handleSubmit()   ← 光标编辑、history、slash 解析
 |------|------|
 | `src/ink/App.tsx` (~743 行) | Ink REPL 根组件：输入/光标/transcript/spinner/banner/进度条/选择器/对话框 |
 | `src/ink/barGlyph.ts` (~30 行) | 进度条渐变字符渲染（`renderBar`） |
+| `src/state/store.ts` (~36 行) | 极简 pub/sub `createStore<T>`（`setState(prev=>next)` + `Object.is` 短路 + `subscribe`）——**存在但未被任何代码 import（死代码）** |
 
-> **无 state/store.ts、无 AppState、无 keybindings/、无 vim/、无 ScrollBox。** 状态全在 `App.tsx` 的 `useState`。详见 [10-ui-and-state.md](./10-ui-and-state.md)。
+> **无 AppState（~450 字段）、无 `useSyncExternalStore` 选择器、无 keybindings/、无 vim/、无 ScrollBox。** 实际状态全在 `App.tsx` 的 `useState`/`useRef`；唯一在用的 pub/sub 是 `TodoWriteTool` 的模块级 store。`src/state/store.ts` 是遗留死代码（文件头自称 "docs §10.1.1"，但无 import 者）——复现时可建空文件保留，或直接不建（不影响构建/运行）。详见 [10-ui-and-state.md](./10-ui-and-state.md)。
 
 ### 4.10 服务层
 

@@ -97,7 +97,7 @@ type CommandResult =
   | { kind: 'none' }                            // 不追加消息（如 /history 打开选择器）
 ```
 
-### 5.1 命令列表（21 个）
+### 5.1 命令列表（20 个）
 
 | 命令 | type | 说明 |
 |------|------|------|
@@ -199,7 +199,7 @@ async call(input, context) {
 }
 ```
 
-> **SkillTool 与 `/skill` slash 命令是两条路径**：SkillTool 是模型主动调用的工具；`/skill` 是用户触发的 slash 命令（但 `commands.ts` **没有**动态注册 skill 为 slash 命令——只有内置 21 个命令）。用户输入 `/未知名` 会落到 `findCommand` 未匹配 → 当普通文本发给模型。skill 只能通过 SkillTool（模型调用）或 `/skills`（列出）触达。
+> **SkillTool 与 `/skill` slash 命令是两条路径**：SkillTool 是模型主动调用的工具；`/skill` 是用户触发的 slash 命令（但 `commands.ts` **没有**动态注册 skill 为 slash 命令——只有内置 20 个命令）。用户输入 `/未知名` 会落到 `findCommand` 未匹配 → 当普通文本发给模型。skill 只能通过 SkillTool（模型调用）或 `/skills`（列出）触达。
 
 ## 7. 插件系统 — 不存在
 
@@ -213,7 +213,7 @@ async call(input, context) {
 ## 8. 已知边界 / 未实现项
 
 - **无插件系统**（`enabledPlugins` 声明但不使用）。
-- **skill 不动态注册为 slash 命令**——`commands.ts` 只有 21 个硬编码命令。用户 `/skill-name` 不会触发 skill（除非正好匹配内置命令名）；skill 只能经 SkillTool 由模型调用。
+- **skill 不动态注册为 slash 命令**——`commands.ts` 只有 20 个硬编码命令。用户 `/skill-name` 不会触发 skill（除非正好匹配内置命令名）；skill 只能经 SkillTool 由模型调用。
 - **无内置 skill**（`source: 'bundled'` 声明但 `loadAllSkills` 不产生）。
 - **无 `/mcp` 命令、无 skill 热重载监控**（`skillChangeDetector` 不存在）。
 - **`local-jsx` 命令类型声明但无命令使用**。
