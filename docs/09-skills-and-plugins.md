@@ -97,7 +97,7 @@ type CommandResult =
   | { kind: 'none' }                            // 不追加消息（如 /history 打开选择器）
 ```
 
-### 5.1 命令列表（20 个）
+### 5.1 命令列表（21 个）
 
 | 命令 | type | 说明 |
 |------|------|------|
@@ -116,6 +116,7 @@ type CommandResult =
 | `/resume <id>` | local | 恢复会话（无参→列会话） |
 | `/plan` | local | 进入 plan 模式 |
 | `/bypass [on\|off\|auto]` | local | 切权限模式 |
+| `/default` | local | 从 bypass/auto 切回 default 权限模式 |
 | `/export` | local | 导出 transcript 到 markdown 文件 |
 | `/stop` | local | 强制停止 agent（运行中由 handleSubmit 拦截，idle 时提示） |
 | `/new` | local | 新对话（清历史+transcript） |
@@ -213,7 +214,7 @@ async call(input, context) {
 ## 8. 已知边界 / 未实现项
 
 - **无插件系统**（`enabledPlugins` 声明但不使用）。
-- **skill 不动态注册为 slash 命令**——`commands.ts` 只有 20 个硬编码命令。用户 `/skill-name` 不会触发 skill（除非正好匹配内置命令名）；skill 只能经 SkillTool 由模型调用。
+- **skill 不动态注册为 slash 命令**——`commands.ts` 只有 21 个硬编码命令（包含 `/default`）。用户 `/skill-name` 不会触发 skill（除非正好匹配内置命令名）；skill 只能经 SkillTool 由模型调用。
 - **无内置 skill**（`source: 'bundled'` 声明但 `loadAllSkills` 不产生）。
 - **无 `/mcp` 命令、无 skill 热重载监控**（`skillChangeDetector` 不存在）。
 - **`local-jsx` 命令类型声明但无命令使用**。

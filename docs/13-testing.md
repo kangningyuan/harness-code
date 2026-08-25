@@ -1,8 +1,8 @@
 # 测试
 
-> 基于 `vitest.config.ts` + `package.json` scripts + `tests/setup.ts` + `tests/` 下 22 个测试文件实际源码。
+> 基于 `vitest.config.ts` + `package.json` scripts + `tests/setup.ts` + `tests/` 下当前测试源码。
 >
-> 复现验证：一个 coding agent 复现本项目后，应能跑通这套测试来验证实现的正确性。当前基线：`npm test` → **19 文件通过 / 3 跳过 / 199 测试通过 / 5 跳过**（API 测试需凭证才跑）。
+> 当前基线（2026-08-26）：`npm test` → **30 文件通过 / 2 跳过 / 85 测试通过 / 2 跳过**（真实 API stream/tool-use 测试需凭证才跑）。测试数量会随着实现阶段增加；以实际命令输出为准。
 
 ## 1. 测试栈
 
@@ -55,6 +55,8 @@ npm run test:api
 > **为什么不靠 vitest config 的 `define` 注入？** `vitest.config.ts` 注释说明：`define` 会把 `process.env.HARNESS_*` 内联成编译时常量，破坏配置优先级链测试（那些测试需要观察 env 缺失时的行为）。所以凭证只从 `process.env` 运行时读。
 
 ## 4. 测试文件清单与分类
+
+当前新增的离线覆盖包括：`tests/unit/api-client.test.ts`、`tests/unit/run-tools.test.ts`、`tests/unit/query-engine.test.ts`、`tests/unit/extractMemories.test.ts`、`tests/unit/plan-mode.test.ts`、`tests/unit/skills.test.ts`、`tests/fs/` 下的文件工具/Bash/Glob/Grep 测试、`tests/ink/App.test.tsx`、`tests/integration/cli.test.ts` 和本地 fixture agent-loop/MCP helper 测试。
 
 ### 4.1 纯单元测试（无网络，`npm test` 即跑）
 
@@ -186,9 +188,9 @@ import { render } from 'ink-testing-library'
 ## 8. 已知边界 / 未实现项
 
 - **`summarizeSession` 无测试**（函数导出但未被调用，见 [12](./12-session-bridge.md) §4.5）。
-- **AgentTool 无测试**（未接线，见 [08](./08-multi-agent-system.md)）。
-- **`assembleToolPool`/`connectAllServers`/`collectMcpTools` 无测试**（死代码，未接线）。
-- **Ink UI（`App.tsx`）无测试**——`ink-testing-library` 已装但无 `*.test.tsx`。
+- **AgentTool 无运行测试**（未接线，见 [08](./08-multi-agent-system.md)）；其余 agent-loop 已有本地 mock fixture 测试。
+- **MCP 运行时接线仍未实现**，但 `connectAllServers`/`collectMcpTools` 已有离线 helper 测试；真实 stdio server 测试仍 gated。
+- **Ink UI 已有最小覆盖**（`tests/ink/App.test.tsx`），完整权限/plan/Enter/Ctrl+C 交互仍建议继续扩展。
 - **`AskUserQuestionTool` 交互 handler 无测试**（未接线）。
-- 真实 API 测试依赖可用的 Anthropic 兼容代理端点（`gpt-5.5`/`mimo-v2.5` 等）；无端点时这些测试永久 skip，不影响 `npm test` 通过。
+- 真实 API stream/tool-use 测试依赖可用的 Anthropic 兼容代理端点（`gpt-5.5`/`mimo-v2.5` 等）；无端点时这些测试 skip，不影响 `npm test` 通过。
 - `vitest.config.ts` 的 esbuild 配置被 vitest 4 的 oxc 忽略（运行时有警告）——不影响测试结果，但 `target`/`jsx` 实际由 oxc 处理。

@@ -1,0 +1,3 @@
+import { describeApi, itApi, TEST_API_KEY, TEST_BASE_URL, TEST_MODEL } from '../setup.js'
+import { ApiClient } from '../../src/services/api/client.js'
+describeApi('real API stream', () => { itApi('returns a short response', async () => { const client = new ApiClient({ apiKey: TEST_API_KEY, baseURL: TEST_BASE_URL, model: TEST_MODEL, smallModel: TEST_MODEL, maxOutputTokens: 128, timeoutMs: 60_000 }); const result = await client.callModel({ model: TEST_MODEL, messages: [{ role: 'user', content: 'Reply with exactly one word: hello' }], max_tokens: 32 }, {}); expect(result.content.some(block => block.type === 'text')).toBe(true) }) })

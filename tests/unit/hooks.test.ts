@@ -1,0 +1,6 @@
+import { createHooksRegistry, runHooks } from '../../src/services/hooks/index.js'
+import { emptyMatchers } from '../../src/services/hooks/loader.js'
+describe('hooks', () => {
+  it('runs function hooks and block wins', async () => { const matchers = emptyMatchers(); matchers.PreToolUse = [{ matcher: 'Write', hooks: [{ type: 'function', function: async () => ({ decision: 'approve' }) }, { type: 'function', function: async () => ({ decision: 'block', reason: 'no' }) }] }]; const result = await runHooks(createHooksRegistry(matchers), 'PreToolUse', { cwd: process.cwd(), toolName: 'Write', input: {} }); expect(result).toMatchObject({ decision: 'block', reason: 'no' }) })
+  it('skips non-matching hooks', async () => { const matchers = emptyMatchers(); matchers.PreToolUse = [{ matcher: 'Read', hooks: [{ type: 'function', function: async () => ({ decision: 'block' }) }] }]; expect((await runHooks(createHooksRegistry(matchers), 'PreToolUse', { cwd: process.cwd(), toolName: 'Write' })).decision).toBeUndefined() })
+})

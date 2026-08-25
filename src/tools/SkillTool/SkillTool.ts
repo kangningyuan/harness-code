@@ -1,0 +1,6 @@
+import { buildTool, textToolResult } from '../../Tool.js'
+import { loadAllSkills, substituteArguments } from '../../skills/loadSkillsDir.js'
+export const SkillTool = buildTool<Record<string, unknown>, unknown>({ name: 'SkillTool', inputJSONSchema: { type: 'object', properties: { skill: { type: 'string', minLength: 1 }, args: { type: 'string' } }, required: ['skill'] }, maxResultSizeChars: 30_000, isReadOnly: () => true, isConcurrencySafe: () => true,
+  async call(input, context) { const skills = loadAllSkills(context.cwd); const skill = skills.find(item => item.name === String(input.skill)); if (!skill) return { data: null, result: `Skill not found: ${String(input.skill)}${skills.length ? `. Available: ${skills.map(item => item.name).join(', ')}` : ''}`, isError: true }; const args = String(input.args ?? ''); const values: Record<string, string> = { ARGUMENTS: args }; args.split(/\s+/).filter(Boolean).forEach((value, index) => values[String(index + 1)] = value); const content = substituteArguments(skill.body, values, skill.skillDir); return { data: { content }, result: content } },
+  description: input => `skill ${String(input.skill ?? '')}`, prompt: () => 'Load a named SKILL.md instruction.', mapToolResultToToolResultBlockParam: textToolResult, renderToolUseMessage: input => String(input.skill ?? '')
+})
