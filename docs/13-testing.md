@@ -2,7 +2,7 @@
 
 > 基于 `vitest.config.ts` + `package.json` scripts + `tests/setup.ts` + `tests/` 下当前测试源码。
 >
-> 当前基线（2026-08-26）：`npm test` → **30 文件通过 / 2 跳过 / 85 测试通过 / 2 跳过**（真实 API stream/tool-use 测试需凭证才跑）。测试数量会随着实现阶段增加；以实际命令输出为准。
+> 当前基线（2026-08-29）：`npm test` → **60 文件通过 / 2 跳过 / 264 测试通过 / 2 跳过**（真实 API stream/tool-use 测试需凭证才跑）。测试数量会随着实现阶段增加；以实际命令输出为准。新增 contract suites 覆盖 API/SSE、query/recovery、artifact、context/memory、background、Task DAG/lock、worktree、agent/protocol、MCP、HTTP hook、security、headless 和 Ink 交互。
 
 ## 1. 测试栈
 
@@ -22,9 +22,13 @@
 |------|------|
 | `npm test` | `vitest run`——跑全部单元 + 集成测试（API 测试自动 skip，见 §4） |
 | `npm run test:watch` | `vitest`——watch 模式 |
+| `npm run test:unit` | 只跑 `tests/unit` contract 和基础单元测试 |
+| `npm run test:fs` | 只跑真实文件系统/进程测试 |
+| `npm run test:integration` | 跑 headless、worktree、MCP 和 Ink 集成测试 |
+| `npm run test:security` | 跑 Bash 安全、权限和 fail-closed 测试 |
 | `npm run test:api` | `RUN_API_TESTS=1 vitest run`——跑真实 API 集成测试（需凭证） |
 | `npm run typecheck` | `tsc --noEmit`——类型检查（`tests/**/*` 在 `tsconfig.json` include 内） |
-| `npm run build` | `tsup`——构建（不影响测试，但验证源码可编译）。**复现时必须先建 `src/shims/react-devtools-core.ts` no-op shim**（见 [README](./README.md) 构建说明 + [01](./01-architecture-overview.md) §4.1），否则 tsup 的 esbuild alias 解析失败、构建报错。 |
+| `npm run build` | `tsup`——构建并验证源码可编译；当前仓库已包含 `src/shims/react-devtools-core.ts` no-op shim。 |
 
 ## 3. `tests/setup.ts` — 测试凭证与 API 门控
 
@@ -56,7 +60,7 @@ npm run test:api
 
 ## 4. 测试文件清单与分类
 
-当前新增的离线覆盖包括：`tests/unit/api-client.test.ts`、`tests/unit/run-tools.test.ts`、`tests/unit/query-engine.test.ts`、`tests/unit/extractMemories.test.ts`、`tests/unit/plan-mode.test.ts`、`tests/unit/skills.test.ts`、`tests/fs/` 下的文件工具/Bash/Glob/Grep 测试、`tests/ink/App.test.tsx`、`tests/integration/cli.test.ts` 和本地 fixture agent-loop/MCP helper 测试。
+当前离线覆盖包括：基础单元测试以及新增的 `*-contract.test.ts` 套件（API/SSE、query/recovery、runTools、artifact、context/memory、background、Task DAG/lock、worktree、agent/protocol、MCP、observability/HTTP hook、security）、`tests/fs/` 文件工具/Bash/Glob/Grep 测试、`tests/ink/` 交互测试、`tests/integration/` headless/tool-loop/worktree 测试和本地 MCP helper 测试。
 
 ### 4.1 纯单元测试（无网络，`npm test` 即跑）
 
@@ -161,7 +165,7 @@ describeApi('agent loop end-to-end', () => {
 
 ## 6. Ink UI 测试
 
-`package.json` devDependencies 含 `ink-testing-library`（`^4.0.0`），但目前 `tests/` 下**没有** `.test.tsx` 文件——**UI 层（`App.tsx`）目前无测试覆盖**。复现时若要补 UI 测试，用：
+`package.json` devDependencies 含 `ink-testing-library`（`^4.0.0`），当前 `tests/ink/` 已有基础渲染和交互 contract 测试。复现或扩展 UI 测试时使用：
 
 ```typescript
 import { render } from 'ink-testing-library'
@@ -169,7 +173,7 @@ import { render } from 'ink-testing-library'
 // 通过 stdin.write 模拟按键，断言 stdout.lastFrame()
 ```
 
-> 这是当前已知覆盖缺口，不是必须复现的——但 `vitest.config.ts` 的 `include` 已含 `*.test.tsx`，框架就绪。
+> `vitest.config.ts` 的 `include` 已含 `*.test.tsx`；交互测试应等待输入状态更新，避免在同一 tick 内连续写入文本和回车造成竞态。
 
 ## 7. 关键被测行为（复现验证清单）
 
@@ -187,10 +191,10 @@ import { render } from 'ink-testing-library'
 
 ## 8. 已知边界 / 未实现项
 
-- **`summarizeSession` 无测试**（函数导出但未被调用，见 [12](./12-session-bridge.md) §4.5）。
-- **AgentTool 无运行测试**（未接线，见 [08](./08-multi-agent-system.md)）；其余 agent-loop 已有本地 mock fixture 测试。
-- **MCP 运行时接线仍未实现**，但 `connectAllServers`/`collectMcpTools` 已有离线 helper 测试；真实 stdio server 测试仍 gated。
-- **Ink UI 已有最小覆盖**（`tests/ink/App.test.tsx`），完整权限/plan/Enter/Ctrl+C 交互仍建议继续扩展。
-- **`AskUserQuestionTool` 交互 handler 无测试**（未接线）。
+- **`summarizeSession` 仍未纳入主流程**；如后续接线，需要补充独立的 API 失败和超长 transcript 测试（见 [12](./12-session-bridge.md) §4.5）。
+- **AgentTool、teammate、Task DAG、background 和 worktree** 已有离线 contract/集成测试；跨进程 broker、长期 lease 和自动恢复仍属于边界。
+- **MCP 运行时已接线**；当前新增测试使用 fake Client/Transport 验证 stdio、Streamable HTTP、工具发现、名称冲突、错误和 registry 生命周期，真实外部 server 仍不作为普通 gate。
+- **Ink UI** 已覆盖渲染、提交、权限/plan 对话和 busy `/stop`；终端差异和完整真实 TTY 行为仍需平台 smoke test。
+- **`AskUserQuestionTool`** 的真实交互 handler 仍未接入 headless 流程，尚需单独的 UI/abort 测试。
 - 真实 API stream/tool-use 测试依赖可用的 Anthropic 兼容代理端点（`gpt-5.5`/`mimo-v2.5` 等）；无端点时这些测试 skip，不影响 `npm test` 通过。
 - `vitest.config.ts` 的 esbuild 配置被 vitest 4 的 oxc 忽略（运行时有警告）——不影响测试结果，但 `target`/`jsx` 实际由 oxc 处理。

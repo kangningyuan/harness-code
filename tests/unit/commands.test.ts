@@ -21,4 +21,15 @@ describe('slash commands', () => {
     expect(text).toContain('/default')
     expect(text).toContain('/init')
   })
+  it('exposes durable task, worktree, and background command behavior', async () => {
+    const context = { cwd: process.cwd(), listTasks: () => 'task-1 · pending · build', listBackgroundTasks: () => 'bg-1 · running · npm test', listWorktrees: () => 'wt-1 · active · feature · /tmp/wt', cancelBackgroundTask: (id: string) => `Cancelled ${id}` }
+    const tasks = await getBuiltinCommands().find(item => item.name === 'tasks')!.run!('', context)
+    const worktrees = await getBuiltinCommands().find(item => item.name === 'worktrees')!.run!('', context)
+    const cancel = await getBuiltinCommands().find(item => item.name === 'cancel')!.run!(' bg-1 ', context)
+    const usage = await getBuiltinCommands().find(item => item.name === 'cancel')!.run!('', context)
+    expect(tasks).toMatchObject({ kind: 'message', message: { content: expect.stringContaining('task-1') } })
+    expect(worktrees).toMatchObject({ kind: 'message', message: { content: expect.stringContaining('wt-1') } })
+    expect(cancel).toMatchObject({ kind: 'message', message: { content: 'Cancelled bg-1' } })
+    expect(usage).toMatchObject({ kind: 'message', message: { content: 'Usage: /cancel <task-id>' } })
+  })
 })
