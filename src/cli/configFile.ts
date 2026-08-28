@@ -9,6 +9,10 @@ export interface HarnessConfigFile {
   model?: string
   smallModel?: string
   maxOutputTokens?: number
+  fallbackModel?: string
+  maxRetries?: number
+  retryBaseDelayMs?: number
+  strictStreamProtocol?: boolean
   models?: ModelEntry[]
 }
 

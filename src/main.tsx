@@ -45,7 +45,7 @@ program.action(async (promptArg: string | undefined, options: Record<string, unk
   const mode: PermissionMode = options.dangerouslySkipPermissions ? 'bypassPermissions' : (requestedPermissionMode as PermissionMode | undefined) ?? settings.permissions?.defaultMode ?? 'default'
   if (options.print || promptArg) {
     if (!promptArg) { process.stderr.write('--print requires a prompt argument.\n'); process.exitCode = 1; return }
-    await runHeadless({ prompt: promptArg, cwd, outputFormat, maxTurns: options.maxTurns as number | undefined, permissionMode: mode, config })
+    await runHeadless({ prompt: promptArg, cwd, outputFormat, maxTurns: options.maxTurns as number | undefined, permissionMode: mode, permissionContext: permissionContextFromSettings(settings, mode), memorySettings: { autoMemoryDirectory: settings.autoMemoryDirectory }, config })
     return
   }
   const client = new ApiClient(config)
@@ -56,12 +56,13 @@ program.action(async (promptArg: string | undefined, options: Record<string, unk
   const requestedSessionId = options.resume === undefined ? undefined : typeof options.resume === 'string' ? options.resume : listSessions(cwd)[0]?.id
   const engine = new QueryEngine({
     client, tools, model: config.model, smallModel: config.smallModel, models: config.models, maxOutputTokens: config.maxOutputTokens,
+    fallbackModel: config.fallbackModel, retryPolicy: { maxAttempts: config.maxRetries, baseDelayMs: config.retryBaseDelayMs },
     maxTurns: (options.maxTurns as number | undefined) ?? 50, cwd, permCtx,
     canUseTool: createCanUseTool(permCtx, { cwd, client, smallModel: config.smallModel, onAsk: (tool, input, reason) => permAskHolder.cb?.(tool.name, input, reason) ?? Promise.resolve(false) }),
-    systemPrompt: fetchSystemPromptParts({ cwd, tools }), hooks: createHooksRegistry(loadHooksFromSettings(settings.hooks)),
+    systemPrompt: () => fetchSystemPromptParts({ cwd, tools, memorySettings: { autoMemoryDirectory: settings.autoMemoryDirectory } }), hooks: createHooksRegistry(loadHooksFromSettings(settings.hooks)),
     memorySettings: { autoMemoryDirectory: settings.autoMemoryDirectory }, startInPlanMode: options.plan === true, sessionId: requestedSessionId,
   })
-  launchRepl(engine, cwd, engine.getUsageTracker(), config, permAskHolder)
+  launchRepl(engine, cwd, engine.getUsageTracker(), config, permAskHolder, { autoMemoryDirectory: settings.autoMemoryDirectory })
 })
 
 program.parseAsync(process.argv).catch(error => { process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`); process.exitCode = 1 })

@@ -27,6 +27,7 @@ export interface AppProps {
   cwd: string
   costTracker: UsageTracker
   config: ApiConfig
+  memorySettings?: { autoMemoryDirectory?: string }
   permAskHolder?: { cb?: (tool: string, input: unknown, reason: string) => Promise<boolean> }
 }
 type Entry = { id: number; role: 'user'|'assistant'|'tool'|'banner'; text: string; toolName?: string }
@@ -52,7 +53,7 @@ function entriesFromMessages(messages: Message[]): Entry[] {
 }
 function formatContextTokens(tokens: number): string { return tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : `${Math.round(tokens)}` }
 
-export function App({ engine, cwd, costTracker, config, permAskHolder }: AppProps) {
+export function App({ engine, cwd, costTracker, config, memorySettings, permAskHolder }: AppProps) {
   const { exit } = useApp()
   const [input, setInput] = useState('')
   const [cursorPos, setCursorPos] = useState(0)
@@ -97,7 +98,7 @@ export function App({ engine, cwd, costTracker, config, permAskHolder }: AppProp
   const exportTranscript = () => { const id = engine.getSessionId() ?? 'current'; const path = join(cwd, `harness-export-${id}.md`); const lines = [`# harness-code transcript (${id})`, '', ...transcript.filter(item => item.role !== 'banner').map(item => `${item.role === 'user' ? '## User' : item.role === 'tool' ? '## Tool' : '## Assistant'}\n\n${item.text}\n`)]; writeFileSync(path, lines.join('\n'), 'utf8'); return `Exported transcript to ${path}` }
   const listModels = () => modelEntries.length ? modelEntries.map((model, index) => `${model.id === footer.model ? '▸ ' : '  '}${index + 1}. ${model.id}${model.name ? ` — ${model.name}` : ''}`).join('\n') : `Current model: ${footer.model}`
   const commandContext = () => ({
-    cwd, clearConversation: () => { engine.clearConversation(); setTranscript([entry('banner', '')]); setTranscriptKey(key => key + 1) }, compact: () => engine.compactNow(), getModel: () => footer.model, setModel: (id: string) => engine.setModel(id), listModels, getConfigSummary: () => `baseURL: ${config.baseURL}\napiKey: ${redactApiKey(config.apiKey)}\nmodel: ${footer.model}\nsmallModel: ${config.smallModel}\nmaxOutputTokens: ${config.maxOutputTokens}`, getCostSummary: () => formatTotalCost(costTracker), listSkills: undefined, getMemoryPrompt: () => loadMemoryPrompt(cwd), extractMemories: () => engine.extractMemories(), listHooks: () => 'Hooks are loaded from project settings.', listSessions: () => listSessions(cwd).slice(0, 20).map(session => `${session.id}  ${session.messageCount} msgs  ${new Date(session.updatedAt).toLocaleString()}`).join('\n') || 'No sessions found', resumeSession: (id: string) => { const result = engine.resumeSession(id); if (result) rebuildTranscript(); return result }, exportTranscript, enterPlanMode: () => engine.enterPlanMode(), isPlanMode: () => engine.isPlanMode(), setPermissionMode: (mode: 'default'|'auto'|'bypassPermissions') => engine.setPermissionMode(mode), getPermissionMode: () => engine.getPermissionMode(), newConversation: () => { engine.newConversation(); setTranscript([entry('banner', '')]); setTranscriptKey(key => key + 1) }, openHistory: showHistory,
+    cwd, clearConversation: () => { engine.clearConversation(); setTranscript([entry('banner', '')]); setTranscriptKey(key => key + 1) }, compact: () => engine.compactNow(), getModel: () => footer.model, setModel: (id: string) => engine.setModel(id), listModels, getConfigSummary: () => `baseURL: ${config.baseURL}\napiKey: ${redactApiKey(config.apiKey)}\nmodel: ${footer.model}\nsmallModel: ${config.smallModel}\nmaxOutputTokens: ${config.maxOutputTokens}`, getCostSummary: () => formatTotalCost(costTracker), listSkills: undefined, getMemoryPrompt: () => loadMemoryPrompt(cwd, memorySettings), extractMemories: () => engine.extractMemories(), listHooks: () => 'Hooks are loaded from project settings.', listSessions: () => listSessions(cwd).slice(0, 20).map(session => `${session.id}  ${session.messageCount} msgs  ${new Date(session.updatedAt).toLocaleString()}`).join('\n') || 'No sessions found', resumeSession: (id: string) => { const result = engine.resumeSession(id); if (result) rebuildTranscript(); return result }, exportTranscript, enterPlanMode: () => engine.enterPlanMode(), isPlanMode: () => engine.isPlanMode(), setPermissionMode: (mode: 'default'|'auto'|'bypassPermissions') => engine.setPermissionMode(mode), getPermissionMode: () => engine.getPermissionMode(), newConversation: () => { engine.newConversation(); setTranscript([entry('banner', '')]); setTranscriptKey(key => key + 1) }, openHistory: showHistory,
   })
 
   const runQuery = async (prompt: string) => {
@@ -139,7 +140,6 @@ export function App({ engine, cwd, costTracker, config, permAskHolder }: AppProp
   const barColor = footer.pct >= 80 ? 'red' : footer.pct >= 50 ? 'yellow' : 'cyan'
   return <Box flexDirection="column">
     <Static key={transcriptKey} items={transcript}>{(item) => <Box key={item.id} flexDirection="column">{item.role === 'banner' && BANNER.map((line, index) => <Text key={index} color="cyan">{line}</Text>)}{item.role === 'user' && <Text color="green">❯ {item.text}</Text>}{item.role === 'assistant' && <Text color="cyan">{item.text}</Text>}{item.role === 'tool' && <Text dimColor>{item.text}</Text>}</Box>}</Static>
-    <Text dimColor>cwd: {cwd}  ·  /help for commands  ·  Esc/Ctrl+C stop  ·  Ctrl+C×2 exit</Text>
     {pendingPerm && <Box flexDirection="column" borderStyle="round" borderColor="magenta" paddingX={1}><Text bold color="magenta">Permission requested: {pendingPerm.tool}</Text><Text dimColor>{pendingPerm.reason}</Text><Text bold color="green">Allow? [y] yes / [n] no</Text></Box>}
     {pendingPlan && <Box flexDirection="column" borderStyle="round" borderColor="yellow" paddingX={1}><Text bold color="yellow">Proposed plan</Text><Text>{pendingPlan}</Text><Text bold color="green">Approve? [y] yes / [n] no</Text></Box>}
     {modelSelectIdx !== null && <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}><Text bold color="cyan">Select model · ↑/↓ move · Enter confirm · Esc cancel</Text>{modelEntries.map((model, index) => <Text key={model.id} color={index === modelSelectIdx ? 'cyan' : undefined} bold={index === modelSelectIdx}>{index === modelSelectIdx ? '❯' : ' '} {model.id}{model.name ? ` — ${model.name}` : ''}</Text>)}</Box>}
@@ -149,6 +149,7 @@ export function App({ engine, cwd, costTracker, config, permAskHolder }: AppProp
     <Box flexDirection="column">{streamingText && <Text color="cyan">{streamingText}</Text>}{loading && !streamingText && <Text dimColor>{SPINNER_FRAMES[spinnerFrame]} {activity}…</Text>}</Box>
     <Text><Text color="blue">❯ </Text>{[...input].slice(0, cursorPos).join('')}<Text color="blue">▋</Text>{[...input].slice(cursorPos).join('')}</Text>
     <Box flexDirection="row"><Text color={barColor}>{renderBar(footer.pct, ringFrame)}</Text><Text dimColor>  ctx: {footer.ctxK}/{footer.winK} ({footer.pct}%) · {footer.model} · {footer.mode}{engine.isPlanMode() ? ' · plan' : ''} · {footer.total}</Text></Box>
+    <Text dimColor>cwd: {cwd}  ·  /help for commands  ·  Esc/Ctrl+C stop  ·  Ctrl+C×2 exit</Text>
   </Box>
 }
-export function launchRepl(engine: QueryEngine, cwd: string, costTracker: UsageTracker, config: ApiConfig, permAskHolder?: AppProps['permAskHolder']): void { void import('ink').then(({ render }) => render(<App engine={engine} cwd={cwd} costTracker={costTracker} config={config} permAskHolder={permAskHolder} />, { exitOnCtrlC: false })) }
+export function launchRepl(engine: QueryEngine, cwd: string, costTracker: UsageTracker, config: ApiConfig, permAskHolder?: AppProps['permAskHolder'], memorySettings?: AppProps['memorySettings']): void { void import('ink').then(({ render }) => render(<App engine={engine} cwd={cwd} costTracker={costTracker} config={config} memorySettings={memorySettings} permAskHolder={permAskHolder} />, { exitOnCtrlC: false })) }

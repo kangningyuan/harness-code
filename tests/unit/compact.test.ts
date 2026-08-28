@@ -1,4 +1,4 @@
-import { compactConversation, createAutoCompact, estimateTokens, resetCompactionState, shouldAutoCompact } from '../../src/services/compact/compact.js'
+import { compactConversation, createAutoCompact, estimateTokens, reactiveCompactConversation, resetCompactionState, shouldAutoCompact } from '../../src/services/compact/compact.js'
 
 describe('compact', () => {
   beforeEach(resetCompactionState)
@@ -21,6 +21,14 @@ describe('compact', () => {
     })
     expect(result).not.toBeNull()
     expect(calls).toEqual(['pre:1', 'post:3'])
+  })
+  it('reactively compacts while retaining a larger recent tail', async () => {
+    const client = { callOnce: vi.fn().mockResolvedValue({ content: [{ type: 'text', text: 'recovery summary' }] }) }
+    const messages = Array.from({ length: 8 }, (_, index) => ({ role: index % 2 ? 'assistant' as const : 'user' as const, content: `message-${index}` }))
+    const result = await reactiveCompactConversation(messages, { client: client as any, model: 'small' })
+    expect(result).toHaveLength(6)
+    expect(result?.[0]?.content).toContain('recovery summary')
+    expect(result?.at(-1)?.content).toBe('message-7')
   })
   it('does not compact below the automatic threshold', async () => {
     const client = { callOnce: vi.fn() }

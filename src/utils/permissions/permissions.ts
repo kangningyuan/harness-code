@@ -6,7 +6,8 @@ import { findMatchingShellRule } from './shellRuleMatching.js'
 import type { PermissionRule, PermissionMode } from './settings.js'
 
 export interface PermissionContext { mode: PermissionMode; rules: PermissionRule[]; avoidPrompts?: boolean }
-export type PermissionDecision = { behavior: 'allow'|'deny'|'ask'; reason: string }
+export interface PermissionEvaluationOptions { hookApproved?: boolean }
+export type PermissionDecision = { behavior: 'allow'|'deny'|'ask'; reason: string; hard?: boolean }
 
 function inputPath(input: Record<string, unknown>): string | undefined { for (const key of ['file_path','notebook_path','path']) if (typeof input[key] === 'string') return input[key] }
 function normalizePath(value: string): string { return value.replaceAll('\\', '/').replace(/\/+/g, '/') }
@@ -42,30 +43,42 @@ function matchingPathRule(tool: BuiltTool, input: Record<string, unknown>, conte
     .sort((a, b) => rulePriority(b.ruleBehavior) - rulePriority(a.ruleBehavior))[0] ?? null
 }
 
-export async function hasPermissionsToUseTool(tool: BuiltTool, input: Record<string, unknown>, context: ToolUseContext, permCtx: PermissionContext): Promise<PermissionDecision> {
+export async function hasPermissionsToUseTool(tool: BuiltTool, input: Record<string, unknown>, context: ToolUseContext, permCtx: PermissionContext, options: PermissionEvaluationOptions = {}): Promise<PermissionDecision> {
   const rules = matchingToolRules(tool, permCtx.rules)
   const deny = rules.find(rule => rule.ruleBehavior === 'deny' && !rule.ruleValue.ruleContent)
-  if (deny) return { behavior: 'deny', reason: 'Denied by tool-level rule' }
+  if (deny) return { behavior: 'deny', reason: 'Denied by tool-level rule', hard: true }
   const toolAsk = rules.find(rule => rule.ruleBehavior === 'ask' && !rule.ruleValue.ruleContent)
   const own = await tool.checkPermissions?.(input, context).catch(() => ({ behavior: 'passthrough' as const })) ?? { behavior: 'passthrough' as const }
-  if (own.behavior === 'deny') return { behavior: 'deny', reason: own.message ?? 'Tool denied the action' }
-  if (own.behavior === 'allow') return { behavior: 'allow', reason: 'Tool allowed the action' }
+  if (own.behavior === 'deny') return { behavior: 'deny', reason: own.message ?? 'Tool denied the action', hard: true }
+
   const path = inputPath(input)
   let isReadOnly = false
   try { isReadOnly = tool.isReadOnly?.(input) === true } catch { isReadOnly = false }
-  if (!isReadOnly && ((path && isSafetyCheckPath(path, context.cwd)) || ((tool.name === 'BashTool' || tool.name === 'Bash') && typeof input.command === 'string' && bashCommandTouchesSafetyPath(input.command)))) return { behavior: 'ask', reason: 'Protected path requires confirmation' }
-  if (toolAsk) return { behavior: 'ask', reason: 'Asking per tool-level ask rule' }
-  if (own.behavior === 'ask') return { behavior: 'ask', reason: own.message ?? 'Tool requires confirmation' }
+  if (!isReadOnly && ((path && isSafetyCheckPath(path, context.cwd)) || ((tool.name === 'BashTool' || tool.name === 'Bash') && typeof input.command === 'string' && bashCommandTouchesSafetyPath(input.command)))) return { behavior: 'ask', reason: 'Protected path requires confirmation', hard: true }
+
+  let explicitAllow = false
   if ((tool.name === 'BashTool' || tool.name === 'Bash') && typeof input.command === 'string') {
     const match = findMatchingShellRule(permCtx.rules, input.command)
-    if (match) return { behavior: match.ruleBehavior, reason: `Matched Bash rule: ${match.ruleBehavior}` }
+    if (match) {
+      if (match.ruleBehavior !== 'allow') return { behavior: match.ruleBehavior, reason: `Matched Bash rule: ${match.ruleBehavior}`, hard: true }
+      explicitAllow = true
+    }
   }
   if (path) {
     const pathRule = matchingPathRule(tool, input, context, rules)
-    if (pathRule) return { behavior: pathRule.ruleBehavior, reason: `Matched path rule: ${pathRule.ruleBehavior}` }
+    if (pathRule) {
+      if (pathRule.ruleBehavior !== 'allow') return { behavior: pathRule.ruleBehavior, reason: `Matched path rule: ${pathRule.ruleBehavior}`, hard: true }
+      explicitAllow = true
+    }
   }
+
+  if (own.behavior === 'allow') return { behavior: 'allow', reason: 'Tool allowed the action' }
+  if (toolAsk) return { behavior: 'ask', reason: 'Asking per tool-level ask rule', hard: true }
+  if (own.behavior === 'ask') return { behavior: 'ask', reason: own.message ?? 'Tool requires confirmation', hard: true }
+  if (explicitAllow) return { behavior: 'allow', reason: 'Allowed by matching rule' }
   if (permCtx.mode === 'bypassPermissions') return { behavior: 'allow', reason: 'Bypass permissions mode' }
   if (isReadOnly) return { behavior: 'allow', reason: 'Allowed (read-only)' }
-  if (permCtx.avoidPrompts) return { behavior: 'deny', reason: 'No matching allow rule (headless)' }
+  if (permCtx.avoidPrompts) return { behavior: 'deny', reason: 'No matching allow rule (headless)', hard: true }
+  if (options.hookApproved) return { behavior: 'allow', reason: 'Approved by PreToolUse hook' }
   return { behavior: 'ask', reason: 'No matching rule; asking user' }
 }

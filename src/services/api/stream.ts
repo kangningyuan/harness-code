@@ -3,6 +3,14 @@ import type { ContentBlock, ModelResult, StreamEvent, ToolUseBlock, Usage } from
 export class RequestAbortedError extends Error {
   constructor(message = 'Request aborted') { super(message); this.name = 'RequestAbortedError' }
 }
+export class StreamProtocolError extends Error {
+  readonly code: string
+  constructor(message: string, code = 'stream_protocol_error') { super(message); this.name = 'StreamProtocolError'; this.code = code }
+}
+export class StreamIncompleteError extends Error {
+  readonly partial?: ModelResult
+  constructor(message: string, partial?: ModelResult) { super(message); this.name = 'StreamIncompleteError'; this.partial = partial }
+}
 
 function usageFrom(value: Record<string, unknown> | undefined): Usage | undefined {
   if (!value) return undefined
@@ -18,6 +26,7 @@ export class StreamAccumulator {
   private toolJson = ''
   private toolBlock: ToolUseBlock | undefined
   private started = false
+  private stopped = false
 
   add(event: StreamEvent): void {
     this.started = true
@@ -69,13 +78,14 @@ export class StreamAccumulator {
       }
       return
     }
-    if (event.type === 'message_stop') return
+    if (event.type === 'message_stop') { this.stopped = true; return }
   }
 
   finalize(): ModelResult {
-    return { content: this.content.filter((block): block is ContentBlock => Boolean(block)), stopReason: this.stopReason, usage: this.usage }
+    return { content: this.content.filter((block): block is ContentBlock => Boolean(block)), stopReason: this.stopReason, usage: this.usage, streamComplete: this.stopped }
   }
   hasContent(): boolean { return this.content.length > 0 || this.started }
+  hasStopped(): boolean { return this.stopped }
 }
 
 export function parseSseLines(text: string, onEvent: (event: StreamEvent) => void): void {
@@ -87,8 +97,8 @@ export function parseSseLines(text: string, onEvent: (event: StreamEvent) => voi
   }
 }
 
-export async function consumeSse(response: Response, accumulator: StreamAccumulator, onEvent?: (event: StreamEvent) => void, signal?: AbortSignal): Promise<ModelResult> {
-  if (!response.body) throw new Error('API response has no body')
+export async function consumeSse(response: Response, accumulator: StreamAccumulator, onEvent?: (event: StreamEvent) => void, signal?: AbortSignal, options: { strict?: boolean } = {}): Promise<ModelResult> {
+  if (!response.body) throw new StreamProtocolError('API response has no body', 'missing_body')
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
@@ -96,11 +106,14 @@ export async function consumeSse(response: Response, accumulator: StreamAccumula
     if (!line.startsWith('data:')) return
     const data = line.slice(5).trim()
     if (!data || data === '[DONE]') return
-    try {
-      const event = JSON.parse(data) as StreamEvent
-      accumulator.add(event)
-      onEvent?.(event)
-    } catch { /* malformed event is ignored */ }
+    let event: StreamEvent
+    try { event = JSON.parse(data) as StreamEvent } catch (error) {
+      if (options.strict) throw new StreamProtocolError(`Malformed SSE data: ${error instanceof Error ? error.message : String(error)}`, 'malformed_sse')
+      return
+    }
+    if (event.type === 'error') throw new StreamProtocolError('API stream returned an error event', 'api_error_event')
+    accumulator.add(event)
+    onEvent?.(event)
   }
   try {
     while (true) {
@@ -119,10 +132,15 @@ export async function consumeSse(response: Response, accumulator: StreamAccumula
     }
   } catch (error) {
     if (error instanceof RequestAbortedError || signal?.aborted) {
-      if (accumulator.finalize().content.length > 0) return accumulator.finalize()
+      const partial = accumulator.finalize()
+      if (partial.content.length > 0) return { ...partial, partial: true, interrupted: true, streamComplete: false }
       throw new RequestAbortedError()
     }
+    if (error instanceof StreamProtocolError || error instanceof StreamIncompleteError) throw error
+    if (accumulator.hasContent()) throw new StreamIncompleteError(error instanceof Error ? error.message : String(error), { ...accumulator.finalize(), partial: true, streamComplete: false })
     throw error
   } finally { reader.releaseLock() }
-  return accumulator.finalize()
+  const result = accumulator.finalize()
+  if (options.strict && !accumulator.hasStopped()) throw new StreamIncompleteError('Stream ended without message_stop', { ...result, partial: true, streamComplete: false })
+  return { ...result, streamComplete: true }
 }

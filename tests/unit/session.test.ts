@@ -1,7 +1,7 @@
 import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { appendMessages, createSession, listSessions, loadSession } from '../../src/services/session/store.js'
+import { appendMessages, createSession, listSessions, loadSession, replaceMessages } from '../../src/services/session/store.js'
 import { isValidSessionId, sessionFile, sessionsDir } from '../../src/services/session/paths.js'
 
 describe('session store', () => {
@@ -10,6 +10,13 @@ describe('session store', () => {
   beforeEach(() => { home = mkdtempSync(join(tmpdir(), 'harness-session-home-')); cwd = join(home, 'project'); vi.stubEnv('HOME', home) })
   afterEach(() => { vi.unstubAllEnvs(); rmSync(home, { recursive: true, force: true }) })
   it('creates, appends, loads, and lists sessions', () => { const session = createSession(cwd, 'test'); appendMessages(cwd, session.id, [{ role: 'user', content: 'hello' }]); expect(loadSession(cwd, session.id).messages).toHaveLength(1); expect(listSessions(cwd)[0]?.id).toBe(session.id) })
+  it('replaces a session snapshot and updates metadata count', () => {
+    const session = createSession(cwd, 'test')
+    appendMessages(cwd, session.id, [{ role: 'user', content: 'old' }])
+    replaceMessages(cwd, session.id, [{ role: 'user', content: 'summary' }, { role: 'assistant', content: 'recent' }])
+    expect(loadSession(cwd, session.id).messages).toEqual([{ role: 'user', content: 'summary' }, { role: 'assistant', content: 'recent' }])
+    expect(listSessions(cwd)[0]?.messageCount).toBe(2)
+  })
   it('skips malformed JSONL lines while loading', () => {
     const session = createSession(cwd, 'test')
     appendMessages(cwd, session.id, [{ role: 'user', content: 'valid' }])

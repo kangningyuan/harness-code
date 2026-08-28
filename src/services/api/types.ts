@@ -25,6 +25,10 @@ export interface ApiConfig {
   maxOutputTokens: number
   timeoutMs: number
   models?: ModelEntry[]
+  fallbackModel?: string
+  maxRetries?: number
+  retryBaseDelayMs?: number
+  strictStreamProtocol?: boolean
   configFilePath?: string
 }
 export interface ModelEntry { id: string; name?: string; maxOutputTokens?: number }
@@ -44,6 +48,10 @@ export interface ModelResult {
   usage?: Usage
   id?: string
   model?: string
+  partial?: boolean
+  interrupted?: boolean
+  streamComplete?: boolean
+  errorCode?: string
 }
 
 export interface StreamEvent {

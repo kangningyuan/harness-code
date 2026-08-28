@@ -12,9 +12,13 @@ export interface ToolUseContext {
   addNotification?: (msg: string) => void
   sendOSNotification?: (msg: string) => void
   permissionContext?: unknown
+  resultStore?: ToolResultStore
+  planApproval?: (plan: string) => Promise<boolean>
 }
 export type PermissionResult = { behavior: 'allow' } | { behavior: 'deny'; message?: string } | { behavior: 'ask'; message?: string } | { behavior: 'passthrough' }
-export interface ToolResult<T = unknown> { data: T; result?: string; isError?: boolean }
+export interface ToolResultReference { id: string; relativePath: string; byteLength: number; sha256: string; preview: string }
+export interface ToolResultStore { persist(content: string, metadata: { toolUseId: string; toolName: string }): ToolResultReference | null }
+export interface ToolResult<T = unknown> { data: T; result?: string; isError?: boolean; rawResult?: string; resultRef?: ToolResultReference }
 export interface ValidationResult { ok: boolean; message?: string }
 export interface ToolDefinition<I = Record<string, unknown>, O = unknown> {
   name: string; aliases?: string[]; inputSchema?: z.ZodTypeAny; inputJSONSchema?: Record<string, unknown>; maxResultSizeChars: number

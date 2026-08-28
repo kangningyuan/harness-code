@@ -35,7 +35,7 @@ function gitStatus(cwd: string): string | null {
     return `Branch: ${branch}\nStatus:\n${status}\nRecent commits:\n${log}`.slice(0, 2000)
   } catch { return null }
 }
-export interface ContextOptions { cwd: string; tools: BuiltTool[]; customSystemPrompt?: string; appendSystemPrompt?: string; extraDirs?: string[] }
+export interface ContextOptions { cwd: string; tools: BuiltTool[]; customSystemPrompt?: string; appendSystemPrompt?: string; extraDirs?: string[]; memorySettings?: { autoMemoryDirectory?: string } }
 export function fetchSystemPromptParts(options: ContextOptions): SystemBlock[] {
   const blocks: SystemBlock[] = [{ type: 'text', text: options.customSystemPrompt ?? getDefaultSystemPrompt(options.tools), cache_control: { type: 'ephemeral' } }]
   const files = findClaudeMdFiles(options.cwd, options.extraDirs)
@@ -43,6 +43,6 @@ export function fetchSystemPromptParts(options: ContextOptions): SystemBlock[] {
   blocks.push({ type: 'text', text: `Today's date is ${new Date().toISOString().slice(0, 10)}.` })
   const status = gitStatus(options.cwd); if (status) blocks.push({ type: 'text', text: `# Git status\n\n${status}` })
   if (options.appendSystemPrompt) blocks.push({ type: 'text', text: options.appendSystemPrompt })
-  const memory = loadMemoryPrompt(options.cwd); if (memory) blocks.push({ type: 'text', text: memory })
+  const memory = loadMemoryPrompt(options.cwd, options.memorySettings); if (memory) blocks.push({ type: 'text', text: memory })
   return blocks
 }

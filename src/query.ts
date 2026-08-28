@@ -1,24 +1,31 @@
 import type { BuiltTool, ToolUseContext } from './Tool.js'
 import { assistantBlocksForNextTurn } from './Tool.js'
 import { ApiError, ApiClient, RequestAbortedError } from './services/api/client.js'
-import type { ContentBlock, Message, ToolUseBlock, Usage } from './services/api/types.js'
+import { createRecoveryState, retryModelCall, type RetryPolicy } from './query/recovery.js'
+import type { ContentBlock, Message, ModelResult, ToolUseBlock, Usage } from './services/api/types.js'
 import { runTools, type CanUseTool, type RunToolsOptions } from './query/runTools.js'
 import { yieldMissingToolResultBlocks } from './query/abort.js'
 
 export type QueryExitReason = 'completed' | 'aborted_streaming' | 'aborted_tools' | 'max_turns' | 'prompt_too_long' | 'error'
-export interface QueryResult { reason: QueryExitReason; messages: Message[]; error?: string }
+export type SystemPromptValue = string | Array<{ type: 'text'; text: string; cache_control?: { type: 'ephemeral' } }>
+export interface QueryResult { reason: QueryExitReason; messages: Message[]; error?: string; errorCode?: string; partial?: ModelResult; contextCompacted?: boolean }
 export interface QueryDeps {
   client: ApiClient
   tools: BuiltTool[]
-  systemPrompt: string | Array<{ type: 'text'; text: string; cache_control?: { type: 'ephemeral' } }>
+  systemPrompt: SystemPromptValue | (() => SystemPromptValue)
   model: string
+  fallbackModel?: string
+  retryPolicy?: Partial<RetryPolicy>
   maxOutputTokens: number
   maxTurns: number
   context: ToolUseContext
   canUseTool: CanUseTool
   autoCompact?: (messages: Message[]) => Promise<Message[] | null>
+  reactiveCompact?: (messages: Message[]) => Promise<Message[] | null>
   compact?: (messages: Message[]) => Promise<Message[] | null>
   runToolsOptions?: Omit<RunToolsOptions, 'canUseTool'>
+  prepareContext?: (messages: Message[]) => Message[] | Promise<Message[]>
+  onRecovery?: (info: { kind: string; attempt?: number; model?: string; delayMs?: number }) => void
   onPreToolUse?: RunToolsOptions['onPreToolUse']
   onPostToolUse?: RunToolsOptions['onPostToolUse']
   onStreamEvent?: (event: unknown) => void
@@ -30,52 +37,124 @@ export interface QueryDeps {
 }
 const MAX_OUTPUT_TOKENS_ESCALATION = 64_000
 const MAX_OUTPUT_TOKEN_RECOVERIES = 3
+const CONTINUATION_PROMPT = 'Continue from where you left off. Do not repeat completed work.'
+
+function systemValue(value: QueryDeps['systemPrompt']): SystemPromptValue { return typeof value === 'function' ? value() : value }
+function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error) }
 
 export async function query(initialMessages: Message[], deps: QueryDeps): Promise<QueryResult> {
   let messages = [...initialMessages]
   let turns = 0
-  let recoveries = 0
   let outputOverride: number | undefined
-  let compactAttempted = false
+  let contextCompacted = false
+  const recovery = createRecoveryState(deps.model)
   while (true) {
-    if (turns >= deps.maxTurns) return { reason: 'max_turns', messages }
-    if (deps.autoCompact) { const compacted = await deps.autoCompact(messages).catch(() => null); if (compacted) messages = compacted }
+    if (deps.context.abortController.signal.aborted) return { reason: 'aborted_streaming', messages, contextCompacted }
+    if (turns >= deps.maxTurns) return { reason: 'max_turns', messages, contextCompacted }
+
     const queued = deps.injectMessages?.() ?? []
     if (queued.length) messages = [...messages, ...queued]
-    let result
-    try {
-      result = await deps.client.callModel({ model: deps.model, messages, system: deps.systemPrompt, tools: deps.tools.map(tool => ({ name: tool.name, description: tool.prompt(), input_schema: tool.jsonSchema })), max_tokens: outputOverride ?? deps.maxOutputTokens }, {
-        onEvent: event => { deps.onStreamEvent?.(event); if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') deps.onTextDelta?.(event.delta.text ?? '') },
-        signal: deps.context.abortController.signal,
-      })
-    } catch (error) {
-      if (error instanceof RequestAbortedError) return { reason: 'aborted_streaming', messages }
+    if (deps.prepareContext) {
+      try {
+        const before = JSON.stringify(messages)
+        messages = await deps.prepareContext(messages)
+        if (JSON.stringify(messages) !== before) contextCompacted = true
+      } catch (error) { return { reason: 'error', messages, error: errorMessage(error), contextCompacted } }
+    }
+    if (deps.autoCompact) {
+      const compacted = await deps.autoCompact(messages).catch(() => null)
+      if (compacted) {
+        messages = compacted
+        contextCompacted = true
+        if (deps.prepareContext) {
+          try { messages = await deps.prepareContext(messages) } catch (error) { return { reason: 'error', messages, error: errorMessage(error), contextCompacted } }
+        }
+      }
+    }
+
+    const modelResult = await retryModelCall(model => deps.client.callModel({
+      model,
+      messages,
+      system: systemValue(deps.systemPrompt),
+      tools: deps.tools.map(tool => ({ name: tool.name, description: tool.prompt(), input_schema: tool.jsonSchema })),
+      max_tokens: outputOverride ?? deps.maxOutputTokens,
+    }, {
+      onEvent: event => { deps.onStreamEvent?.(event); if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') deps.onTextDelta?.(event.delta.text ?? '') },
+      signal: deps.context.abortController.signal,
+    }), {
+      state: recovery,
+      policy: deps.retryPolicy,
+      fallbackModel: deps.fallbackModel,
+      signal: deps.context.abortController.signal,
+      onRetry: info => { deps.onRecovery?.({ kind: 'retry', attempt: info.attempt, model: info.model, delayMs: info.delayMs }) },
+    }).catch(error => ({ error }))
+
+    if ('error' in modelResult) {
+      const error = modelResult.error
+      if (error instanceof RequestAbortedError) return { reason: 'aborted_streaming', messages, contextCompacted }
       if (error instanceof ApiError && error.isPromptTooLong) {
-        if (!compactAttempted && (deps.compact ?? deps.autoCompact)) { compactAttempted = true; const compacted = await (deps.compact ?? deps.autoCompact)!(messages).catch(() => null); if (compacted) { messages = compacted; continue } }
-        return { reason: 'prompt_too_long', messages, error: error.message }
+        if (!recovery.reactiveCompactUsed && (deps.reactiveCompact ?? deps.compact ?? deps.autoCompact)) {
+          recovery.reactiveCompactUsed = true
+          deps.onRecovery?.({ kind: 'reactive_compact' })
+          const compact = deps.reactiveCompact ?? deps.compact ?? deps.autoCompact
+          const compacted = await compact!(messages).catch(() => null)
+          if (compacted) { messages = compacted; contextCompacted = true; continue }
+        }
+        return { reason: 'prompt_too_long', messages, error: error.message, errorCode: error.code, contextCompacted }
       }
       if (error instanceof ApiError && error.isMaxOutputTokens) {
-        if (outputOverride === undefined) { outputOverride = MAX_OUTPUT_TOKENS_ESCALATION; continue }
-        if (recoveries < MAX_OUTPUT_TOKEN_RECOVERIES) { recoveries++; messages = [...messages, { role: 'user', content: 'Continue from where you left off.' }]; continue }
+        if (!recovery.hasEscalated) {
+          recovery.hasEscalated = true
+          outputOverride = MAX_OUTPUT_TOKENS_ESCALATION
+          deps.onRecovery?.({ kind: 'output_escalation', model: recovery.currentModel })
+          continue
+        }
+        if (recovery.outputRecoveries < MAX_OUTPUT_TOKEN_RECOVERIES) {
+          recovery.outputRecoveries++
+          messages = [...messages, { role: 'user', content: CONTINUATION_PROMPT }]
+          deps.onRecovery?.({ kind: 'continuation', attempt: recovery.outputRecoveries, model: recovery.currentModel })
+          continue
+        }
       }
-      return { reason: 'error', messages, error: error instanceof Error ? error.message : String(error) }
+      const partial = error && typeof error === 'object' && 'partial' in error ? (error as { partial?: ModelResult }).partial : undefined
+      return { reason: 'error', messages, error: errorMessage(error), errorCode: error instanceof Error && 'code' in error ? String((error as { code?: unknown }).code ?? '') : undefined, partial, contextCompacted }
     }
+
+    const result = modelResult.value
     turns++
-    if (result.usage) deps.onUsage?.(deps.model, result.usage)
+    if (result.usage) deps.onUsage?.(modelResult.model, result.usage)
+    if (result.interrupted || result.partial) return { reason: result.interrupted ? 'aborted_streaming' : 'error', messages, error: result.interrupted ? 'Request interrupted' : 'Incomplete model response', errorCode: result.interrupted ? 'aborted' : 'incomplete_stream', partial: result, contextCompacted }
+
     const assistantBlocks = result.content
     messages = [...messages, { role: 'assistant', content: assistantBlocksForNextTurn(assistantBlocks) }]
-    const toolUse = assistantBlocks.filter((block): block is ToolUseBlock => block.type === 'tool_use')
-    if (!toolUse.length) {
-      if (result.stopReason === 'max_tokens' && recoveries < MAX_OUTPUT_TOKEN_RECOVERIES) { recoveries++; messages = [...messages, { role: 'user', content: 'Continue from where you left off.' }]; continue }
-      return { reason: 'completed', messages }
+    if (result.stopReason === 'max_tokens') {
+      if (!recovery.hasEscalated) {
+        recovery.hasEscalated = true
+        outputOverride = MAX_OUTPUT_TOKENS_ESCALATION
+        deps.onRecovery?.({ kind: 'output_escalation', model: modelResult.model })
+        continue
+      }
+      if (recovery.outputRecoveries < MAX_OUTPUT_TOKEN_RECOVERIES) {
+        recovery.outputRecoveries++
+        messages = [...messages, { role: 'user', content: CONTINUATION_PROMPT }]
+        deps.onRecovery?.({ kind: 'continuation', attempt: recovery.outputRecoveries, model: modelResult.model })
+        continue
+      }
+    } else {
+      recovery.hasEscalated = false
+      recovery.outputRecoveries = 0
+      outputOverride = undefined
     }
+
+    const toolUse = assistantBlocks.filter((block): block is ToolUseBlock => block.type === 'tool_use')
+    if (!toolUse.length) return { reason: 'completed', messages, contextCompacted }
     try {
       const toolMessages = await runTools(toolUse, deps.tools, deps.context, { ...deps.runToolsOptions, canUseTool: deps.canUseTool, onPreToolUse: deps.onPreToolUse, onPostToolUse: deps.onPostToolUse, onToolStart: deps.onToolStart, onToolEnd: deps.onToolEnd })
       messages = [...messages, ...toolMessages]
     } catch (error) {
       const synthetic = yieldMissingToolResultBlocks(assistantBlocks, [])
       if (synthetic) messages = [...messages, synthetic]
-      if (deps.context.abortController.signal.aborted || error instanceof RequestAbortedError) return { reason: 'aborted_tools', messages }
+      if (deps.context.abortController.signal.aborted || error instanceof RequestAbortedError) return { reason: 'aborted_tools', messages, contextCompacted }
     }
   }
 }

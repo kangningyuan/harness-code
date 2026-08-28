@@ -7,7 +7,7 @@ export type MemoryType = 'user' | 'feedback' | 'project' | 'reference'
 export interface MemoryFile { path: string; name: string; description: string; type: MemoryType; body: string; mtimeMs: number }
 function parseFrontmatter(raw: string): Record<string, string> {
   const out: Record<string, string> = {}
-  for (const line of raw.split(/\r?\n/)) { const match = /^([\w-]+):\s*(.*)$/.exec(line); if (match?.[1]) out[match[1]] = match[2] ?? '' }
+  for (const line of raw.split(/\r?\n/)) { const match = /^\s*([\w-]+):\s*(.*)$/.exec(line); if (match?.[1]) out[match[1]] = match[2] ?? '' }
   return out
 }
 export function parseMemoryFile(path: string): MemoryFile | null {

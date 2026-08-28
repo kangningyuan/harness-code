@@ -31,6 +31,7 @@ build/
 *.tsbuildinfo
 
 # 运行时数据
+.harness-code/tool-results/
 *.pid
 *.seed
 *.pid.lock

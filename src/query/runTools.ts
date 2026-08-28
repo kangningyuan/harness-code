@@ -1,15 +1,16 @@
 import type { BuiltTool, ToolResult, ToolUseContext } from '../Tool.js'
 import { textToolResult } from '../Tool.js'
+import { formatToolResultReference } from '../services/tool-results/store.js'
 import type { Message, ToolResultBlock, ToolUseBlock } from '../services/api/types.js'
 
 export interface CanUseToolResult { behavior: 'allow' | 'deny'; message?: string }
-export type CanUseTool = (tool: BuiltTool, input: Record<string, unknown>) => Promise<CanUseToolResult>
+export type CanUseTool = (tool: BuiltTool, input: Record<string, unknown>, options?: { hookApproved?: boolean; signal?: AbortSignal }) => Promise<CanUseToolResult>
 export interface RunToolsOptions {
   canUseTool?: CanUseTool
   onToolStart?: (name: string, input: unknown) => void
   onToolEnd?: (name: string, input: unknown, result: unknown, isError: boolean) => void
-  onPreToolUse?: (name: string, input: Record<string, unknown>) => Promise<{ decision?: 'block'|'approve'; reason?: string }>
-  onPostToolUse?: (name: string, input: Record<string, unknown>, result: unknown, isError: boolean) => Promise<void>
+  onPreToolUse?: (name: string, input: Record<string, unknown>, toolUseId?: string) => Promise<{ decision?: 'block'|'approve'; reason?: string }>
+  onPostToolUse?: (name: string, input: Record<string, unknown>, result: unknown, isError: boolean, toolUseId?: string) => Promise<void>
   maxResultSizeChars?: number
 }
 
@@ -95,13 +96,13 @@ async function executeOne(block: ToolUseBlock, tool: BuiltTool | undefined, cont
   }
   let hookApproved = false
   if (options.onPreToolUse) {
-    const outcome: { decision?: 'block'|'approve'; reason?: string } = await options.onPreToolUse(block.name, input).catch(() => ({}))
+    const outcome: { decision?: 'block'|'approve'; reason?: string } = await options.onPreToolUse(block.name, input, block.id).catch(() => ({}))
     if (outcome.decision === 'block') return errorBlock(block.id, `Blocked by PreToolUse hook${outcome.reason ? `: ${outcome.reason}` : ''}`)
     hookApproved = outcome.decision === 'approve'
   }
-  if (!hookApproved && options.canUseTool) {
+  if (options.canUseTool) {
     let permission: CanUseToolResult
-    try { permission = await options.canUseTool(tool, input) }
+    try { permission = await options.canUseTool(tool, input, { hookApproved, signal: context.abortController.signal }) }
     catch (error) { return errorBlock(block.id, `Permission check failed: ${error instanceof Error ? error.message : String(error)}`) }
     if (permission.behavior === 'deny') return errorBlock(block.id, `Permission denied${permission.message ? `: ${permission.message}` : ''}`)
   }
@@ -111,12 +112,20 @@ async function executeOne(block: ToolUseBlock, tool: BuiltTool | undefined, cont
   catch (error) { result = { data: null, result: error instanceof Error ? error.message : String(error), isError: true } }
   const isError = result.isError === true
   try { options.onToolEnd?.(tool.name, input, result, isError) } catch { /* UI callbacks must not block tools */ }
-  try { await options.onPostToolUse?.(tool.name, input, result, isError) } catch { /* PostToolUse is observe-only */ }
-  const text = resultText(result)
+  try { await options.onPostToolUse?.(tool.name, input, result, isError, block.id) } catch { /* PostToolUse is observe-only */ }
+  const text = result.rawResult ?? resultText(result)
   const max = options.maxResultSizeChars ?? tool.maxResultSizeChars
+  const reference = context.resultStore?.persist(text, { toolUseId: block.id, toolName: tool.name })
+  if (reference) return errorOrNormalBlock(block.id, formatToolResultReference(reference), isError)
   if (Number.isFinite(max) && text.length > max) return errorOrNormalBlock(block.id, text.slice(0, max) + `\n... (truncated, ${text.length - max} chars omitted)`, isError)
-  try { return tool.mapToolResultToToolResultBlockParam?.(result, block.id) ?? textToolResult(result, block.id) }
-  catch (error) { return errorBlock(block.id, `Failed to serialize tool result: ${error instanceof Error ? error.message : String(error)}`) }
+  try {
+    const mapped = tool.mapToolResultToToolResultBlockParam?.(result, block.id) ?? textToolResult(result, block.id)
+    if (Number.isFinite(max)) {
+      const mappedText = mapped.map(value => typeof value.content === 'string' ? value.content : JSON.stringify(value.content) ?? '').join('\n')
+      if (mappedText.length > max) return errorOrNormalBlock(block.id, mappedText.slice(0, max) + `\n... (truncated, ${mappedText.length - max} chars omitted)`, isError)
+    }
+    return mapped
+  } catch (error) { return errorBlock(block.id, `Failed to serialize tool result: ${error instanceof Error ? error.message : String(error)}`) }
 }
 function errorOrNormalBlock(id: string, content: string, isError: boolean): ToolResultBlock[] { return [{ type: 'tool_result', tool_use_id: id, content, is_error: isError }] }
 function isConcurrencySafe(tool: BuiltTool | undefined, input: unknown): boolean {
@@ -125,13 +134,18 @@ function isConcurrencySafe(tool: BuiltTool | undefined, input: unknown): boolean
 }
 
 export async function runTools(blocks: ToolUseBlock[], tools: BuiltTool[], context: ToolUseContext, options: RunToolsOptions = {}): Promise<Message[]> {
-  const resolved = blocks.map(block => ({ block, tool: tools.find(candidate => candidate.name === block.name || candidate.aliases?.includes(block.name)) }))
-  const safe = resolved.filter(item => isConcurrencySafe(item.tool, item.block.input))
-  const unsafe = resolved.filter(item => !safe.includes(item))
-  const results = new Map<string, ToolResultBlock[]>()
-  const safeResults = await Promise.all(safe.map(async item => [item.block.id, await executeOne(item.block, item.tool, context, options)] as const))
-  for (const [id, result] of safeResults) results.set(id, result)
-  for (const item of unsafe) results.set(item.block.id, await executeOne(item.block, item.tool, context, options))
-  const content = blocks.flatMap(block => results.get(block.id) ?? errorBlock(block.id, 'Tool execution produced no result'))
+  const seenIds = new Set<string>()
+  const resolved = blocks.map(block => {
+    const duplicate = seenIds.has(block.id); seenIds.add(block.id)
+    return { block, duplicate, tool: tools.find(candidate => candidate.name === block.name || candidate.aliases?.includes(block.name)) }
+  })
+  const safe = resolved.filter(item => !item.duplicate && isConcurrencySafe(item.tool, item.block.input))
+  const unsafe = resolved.filter(item => !item.duplicate && !safe.includes(item))
+  const results = new Map<ToolUseBlock, ToolResultBlock[]>()
+  for (const item of resolved.filter(value => value.duplicate)) results.set(item.block, errorBlock(item.block.id, 'Duplicate tool_use id; refusing to execute twice'))
+  const safeResults = await Promise.all(safe.map(async item => [item.block, await executeOne(item.block, item.tool, context, options)] as const))
+  for (const [block, result] of safeResults) results.set(block, result)
+  for (const item of unsafe) results.set(item.block, await executeOne(item.block, item.tool, context, options))
+  const content = blocks.flatMap(block => results.get(block) ?? errorBlock(block.id, 'Tool execution produced no result'))
   return [{ role: 'user', content }]
 }

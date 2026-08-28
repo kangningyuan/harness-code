@@ -28,6 +28,14 @@ describe('runTools', () => {
     expect((result[0]?.content as Array<{ content?: string }>)[0]?.content).toContain('Permission check failed')
   })
 
+  it('does not let hook approval bypass a hard permission denial', async () => {
+    const call = vi.fn().mockResolvedValue({ data: 'called', result: 'called' })
+    const tool = buildTool<Record<string, unknown>, unknown>({ name: 'Write', inputJSONSchema: { type: 'object' }, maxResultSizeChars: 100, call, description: () => '', prompt: () => '', renderToolUseMessage: () => '' })
+    const result = await runTools([block('Write')], [tool], context(), { onPreToolUse: async () => ({ decision: 'approve' }), canUseTool: async () => ({ behavior: 'deny', message: 'protected' }) })
+    expect(call).not.toHaveBeenCalled()
+    expect((result[0]?.content as Array<{ content?: string }>)[0]?.content).toContain('Permission denied')
+  })
+
   it('keeps a tool whose concurrency classifier throws in the serial path', async () => {
     const order: string[] = []
     const safe = buildTool<Record<string, unknown>, unknown>({ name: 'Safe', inputJSONSchema: { type: 'object' }, maxResultSizeChars: 100, isConcurrencySafe: () => { throw new Error('unknown') }, call: async () => { order.push('safe'); return { data: 'ok', result: 'ok' } }, description: () => '', prompt: () => '', renderToolUseMessage: () => '' })

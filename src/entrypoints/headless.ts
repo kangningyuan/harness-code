@@ -2,12 +2,15 @@ import type { ApiConfig } from '../services/api/types.js'
 import { ApiClient } from '../services/api/client.js'
 import { QueryEngine } from '../QueryEngine.js'
 import { getBuiltinTools } from '../tools.js'
+import { fetchSystemPromptParts } from '../context.js'
 import { createCanUseTool } from '../permissions/canUseTool.js'
 import type { PermissionMode } from '../utils/permissions/settings.js'
+import type { PermissionContext } from '../utils/permissions/permissions.js'
 import type { Message } from '../services/api/types.js'
-export async function runHeadless(options: { prompt: string; cwd: string; outputFormat?: 'text'|'stream-json'; maxTurns?: number; permissionMode?: PermissionMode; config: ApiConfig }): Promise<{ reason: string; error?: string }> {
+export async function runHeadless(options: { prompt: string; cwd: string; outputFormat?: 'text'|'stream-json'; maxTurns?: number; permissionMode?: PermissionMode; permissionContext?: PermissionContext; memorySettings?: { autoMemoryDirectory?: string }; config: ApiConfig }): Promise<{ reason: string; error?: string }> {
   const client = new ApiClient(options.config)
-  const engine = new QueryEngine({ client, tools: getBuiltinTools(), model: options.config.model, smallModel: options.config.smallModel, models: options.config.models, maxOutputTokens: options.config.maxOutputTokens, maxTurns: options.maxTurns ?? 30, cwd: options.cwd, canUseTool: createCanUseTool({ mode: options.permissionMode ?? 'auto', rules: [], avoidPrompts: true }, { cwd: options.cwd, client, smallModel: options.config.smallModel }), disableSessionPersistence: true })
+  const tools = getBuiltinTools()
+  const engine = new QueryEngine({ client, tools, systemPrompt: () => fetchSystemPromptParts({ cwd: options.cwd, tools, memorySettings: options.memorySettings }), model: options.config.model, smallModel: options.config.smallModel, models: options.config.models, fallbackModel: options.config.fallbackModel, retryPolicy: { maxAttempts: options.config.maxRetries, baseDelayMs: options.config.retryBaseDelayMs }, maxOutputTokens: options.config.maxOutputTokens, maxTurns: options.maxTurns ?? 30, cwd: options.cwd, canUseTool: createCanUseTool({ ...(options.permissionContext ?? { mode: options.permissionMode ?? 'auto', rules: [] }), avoidPrompts: true }, { cwd: options.cwd, client, smallModel: options.config.smallModel }), disableSessionPersistence: true })
   const output = (value: unknown) => process.stdout.write(JSON.stringify(value) + '\n')
   const result = await engine.submitMessage(options.prompt, {
     onTextDelta: text => { if (options.outputFormat === 'stream-json') output({ type: 'stream_event', subtype: 'text_delta', text }); else process.stdout.write(text) },
