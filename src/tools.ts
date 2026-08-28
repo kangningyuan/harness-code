@@ -12,6 +12,7 @@ import { WebFetchTool } from './tools/WebFetchTool/WebFetchTool.js'
 import { AgentTool } from './tools/AgentTool/AgentTool.js'
 import { SkillTool } from './tools/SkillTool/SkillTool.js'
 import { ExitPlanModeTool } from './tools/ExitPlanModeTool/ExitPlanModeTool.js'
-export function getBuiltinTools(): BuiltTool[] { return [FileReadTool, FileEditTool, FileWriteTool, NotebookEditTool, BashTool, GlobTool, GrepTool, TodoWriteTool, AskUserQuestionTool, WebFetchTool, AgentTool, SkillTool, ExitPlanModeTool] }
+export interface BuiltinToolOptions { agentTool?: BuiltTool; excludeAgent?: boolean }
+export function getBuiltinTools(additional: BuiltTool[] = [], options: BuiltinToolOptions = {}): BuiltTool[] { const agent = options.agentTool ?? AgentTool; return [FileReadTool, FileEditTool, FileWriteTool, NotebookEditTool, BashTool, GlobTool, GrepTool, TodoWriteTool, AskUserQuestionTool, WebFetchTool, ...(options.excludeAgent ? [] : [agent]), SkillTool, ExitPlanModeTool, ...additional] }
 export function assembleToolPool(builtin: BuiltTool[], mcp: BuiltTool[] = []): BuiltTool[] { const seen = new Set<string>(); return [...builtin, ...mcp].sort((a, b) => a.name.localeCompare(b.name)).filter(tool => !seen.has(tool.name) && (seen.add(tool.name), true)) }
 export function toolsToApiDefs(tools: BuiltTool[]) { return tools.map(tool => ({ name: tool.name, description: tool.prompt(), input_schema: tool.jsonSchema })) }

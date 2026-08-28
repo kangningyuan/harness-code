@@ -53,7 +53,9 @@ export async function hasPermissionsToUseTool(tool: BuiltTool, input: Record<str
 
   const path = inputPath(input)
   let isReadOnly = false
-  try { isReadOnly = tool.isReadOnly?.(input) === true } catch { isReadOnly = false }
+  let isDestructive = false
+  try { isReadOnly = tool.isReadOnly?.(input) === true; isDestructive = tool.isDestructive?.(input) === true } catch { isReadOnly = false; isDestructive = false }
+  if (!isReadOnly && isDestructive) return { behavior: 'ask', reason: 'Destructive action requires confirmation', hard: true }
   if (!isReadOnly && ((path && isSafetyCheckPath(path, context.cwd)) || ((tool.name === 'BashTool' || tool.name === 'Bash') && typeof input.command === 'string' && bashCommandTouchesSafetyPath(input.command)))) return { behavior: 'ask', reason: 'Protected path requires confirmation', hard: true }
 
   let explicitAllow = false

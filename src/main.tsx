@@ -12,6 +12,17 @@ import { launchRepl } from './ink/App.js'
 import { fetchSystemPromptParts } from './context.js'
 import { createHooksRegistry, loadHooksFromSettings } from './services/hooks/index.js'
 import { listSessions } from './services/session/store.js'
+import { createTaskService } from './services/tasks/service.js'
+import { createTaskTools } from './tools/TaskTools.js'
+import { createWorktreeService } from './services/worktree/service.js'
+import { createWorktreeTools } from './tools/WorktreeTools.js'
+import { AgentManager, type AgentRunRequest, type AgentResult } from './services/agents/agentManager.js'
+import { createAgentTool } from './tools/AgentTool/AgentTool.js'
+import type { BuiltTool } from './Tool.js'
+import { MessageBus, ProtocolRequestStore } from './services/protocol/index.js'
+import { TeammateManager } from './services/agents/teammateManager.js'
+import { createProtocolTools } from './tools/ProtocolTools.js'
+import { McpRegistry } from './services/mcp/registry.js'
 
 const program = new Command()
   .name('harness-code')
@@ -43,26 +54,67 @@ program.action(async (promptArg: string | undefined, options: Record<string, unk
   const requestedPermissionMode = options.permissionMode as string | undefined
   if (requestedPermissionMode && !['default', 'auto', 'bypassPermissions'].includes(requestedPermissionMode)) { process.stderr.write(`Invalid permission mode: ${requestedPermissionMode}\n`); process.exitCode = 1; return }
   const mode: PermissionMode = options.dangerouslySkipPermissions ? 'bypassPermissions' : (requestedPermissionMode as PermissionMode | undefined) ?? settings.permissions?.defaultMode ?? 'default'
+  const permCtx = permissionContextFromSettings(settings, mode)
+  const taskService = createTaskService(cwd)
+  const recoveredTasks = taskService.reconcile()
+  const worktreeService = createWorktreeService(cwd, undefined, taskService)
+  const orphanedWorktrees = worktreeService.reconcile()
+  if (recoveredTasks.length) process.stderr.write(`[tasks] recovered ${recoveredTasks.length} expired lease(s)\n`)
+  if (orphanedWorktrees.length) process.stderr.write(`[worktrees] found ${orphanedWorktrees.length} orphaned record(s)\n`)
+  const client = new ApiClient(config)
+  const hooks = createHooksRegistry(loadHooksFromSettings(settings.hooks))
+  const mcpRegistry = new McpRegistry()
+  const mcpTools = await mcpRegistry.connect(settings.mcpServers)
+  const messageBus = new MessageBus(cwd)
+  const requestStore = new ProtocolRequestStore(cwd)
+  let toolPool: BuiltTool[] = []
+  let teammateManager: TeammateManager | undefined
+  const agentManager: AgentManager = new AgentManager(async (request: AgentRunRequest): Promise<Omit<AgentResult, 'agentId'>> => {
+    const childTools = toolPool.filter(tool => tool.name !== 'AgentTool')
+    const childPermissions = { mode: permCtx.mode, rules: [...permCtx.rules], avoidPrompts: true }
+    const child = new QueryEngine({
+      client, tools: childTools, model: config.model, smallModel: config.smallModel, models: config.models,
+      fallbackModel: config.fallbackModel, retryPolicy: { maxAttempts: config.maxRetries, baseDelayMs: config.retryBaseDelayMs },
+      agentId: request.agentId, scopeSessionId: request.parentSessionId, maxOutputTokens: config.maxOutputTokens, maxTurns: request.maxTurns ?? 20,
+      cwd: request.cwd, incomingMessages: () => messageBus.consume(request.agentId ?? 'unknown', request.parentSessionId ?? 'ephemeral').map(message => ({ role: 'user' as const, content: `<inbox message_id="${message.messageId}" type="${message.type}">\n${message.payload}\n</inbox>` })), beforeModel: () => teammateManager?.waitIfPaused(request.agentId ?? '') ?? Promise.resolve(), taskService, worktreeService, permCtx: childPermissions,
+      canUseTool: createCanUseTool(childPermissions, { cwd: request.cwd, client, smallModel: config.smallModel }),
+      systemPrompt: () => fetchSystemPromptParts({ cwd: request.cwd, tools: childTools, memorySettings: { autoMemoryDirectory: settings.autoMemoryDirectory } }),
+      hooks, loadBackgroundTasks: false, disableSessionPersistence: true,
+    })
+    const onAbort = () => child.interrupt()
+    request.signal?.addEventListener('abort', onAbort, { once: true })
+    try {
+      const result = await child.submitMessage(request.prompt)
+      const summary = child.getFinalText() || (result.reason === 'completed' ? 'Agent completed without a text summary.' : '')
+      return { status: result.reason === 'completed' ? 'completed' : request.signal?.aborted ? 'cancelled' : 'failed', summary, error: result.error }
+    } finally {
+      request.signal?.removeEventListener('abort', onAbort)
+      await child.shutdown()
+    }
+  })
+  teammateManager = new TeammateManager(agentManager, messageBus, requestStore, worktreeService)
+  const tools = getBuiltinTools([...createTaskTools(taskService), ...createWorktreeTools(worktreeService), ...createProtocolTools(teammateManager!), ...mcpTools], { agentTool: createAgentTool({ agentManager, worktreeService }) })
+  toolPool = tools
+  const memorySettings = { autoMemoryDirectory: settings.autoMemoryDirectory }
   if (options.print || promptArg) {
     if (!promptArg) { process.stderr.write('--print requires a prompt argument.\n'); process.exitCode = 1; return }
-    await runHeadless({ prompt: promptArg, cwd, outputFormat, maxTurns: options.maxTurns as number | undefined, permissionMode: mode, permissionContext: permissionContextFromSettings(settings, mode), memorySettings: { autoMemoryDirectory: settings.autoMemoryDirectory }, config })
+    await runHeadless({ prompt: promptArg, cwd, outputFormat, maxTurns: options.maxTurns as number | undefined, permissionMode: mode, permissionContext: permCtx, memorySettings, taskService, worktreeService, agentManager, teammateManager, messageBus, mcpRegistry, config })
     return
   }
-  const client = new ApiClient(config)
-  const tools = getBuiltinTools()
-  const permCtx = permissionContextFromSettings(settings, mode)
   const permAskHolder: { cb?: (tool: string, input: unknown, reason: string) => Promise<boolean> } = {}
   if (typeof options.resume === 'string' && !listSessions(cwd).some(session => session.id === options.resume)) { process.stderr.write(`Session not found: ${options.resume}\n`); process.exitCode = 1; return }
   const requestedSessionId = options.resume === undefined ? undefined : typeof options.resume === 'string' ? options.resume : listSessions(cwd)[0]?.id
+  let parentEngine: QueryEngine | undefined
   const engine = new QueryEngine({
     client, tools, model: config.model, smallModel: config.smallModel, models: config.models, maxOutputTokens: config.maxOutputTokens,
     fallbackModel: config.fallbackModel, retryPolicy: { maxAttempts: config.maxRetries, baseDelayMs: config.retryBaseDelayMs },
-    maxTurns: (options.maxTurns as number | undefined) ?? 50, cwd, permCtx,
+    maxTurns: (options.maxTurns as number | undefined) ?? 50, cwd, incomingMessages: () => messageBus.consume('lead', parentEngine?.getSessionId() ?? requestedSessionId ?? 'ephemeral').map(message => ({ role: 'user' as const, content: `<inbox message_id="${message.messageId}" type="${message.type}">\n${message.payload}\n</inbox>` })), permCtx,
     canUseTool: createCanUseTool(permCtx, { cwd, client, smallModel: config.smallModel, onAsk: (tool, input, reason) => permAskHolder.cb?.(tool.name, input, reason) ?? Promise.resolve(false) }),
-    systemPrompt: () => fetchSystemPromptParts({ cwd, tools, memorySettings: { autoMemoryDirectory: settings.autoMemoryDirectory } }), hooks: createHooksRegistry(loadHooksFromSettings(settings.hooks)),
-    memorySettings: { autoMemoryDirectory: settings.autoMemoryDirectory }, startInPlanMode: options.plan === true, sessionId: requestedSessionId,
+    systemPrompt: () => fetchSystemPromptParts({ cwd, tools, memorySettings }), hooks,
+    memorySettings, taskService, worktreeService, backgroundManager: undefined, agentManager, messageBus, teammateManager, startInPlanMode: options.plan === true, sessionId: requestedSessionId,
   })
-  launchRepl(engine, cwd, engine.getUsageTracker(), config, permAskHolder, { autoMemoryDirectory: settings.autoMemoryDirectory })
+  parentEngine = engine
+  launchRepl(engine, cwd, engine.getUsageTracker(), config, permAskHolder, memorySettings)
 })
 
 program.parseAsync(process.argv).catch(error => { process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`); process.exitCode = 1 })

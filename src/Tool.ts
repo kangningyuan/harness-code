@@ -1,5 +1,7 @@
 import { z } from 'zod'
 import type { ContentBlock, Message, SystemBlock, ToolResultBlock } from './services/api/types.js'
+import type { CorrelationContext } from './services/protocol/types.js'
+import type { EventLogger } from './services/observability/events.js'
 
 export interface FileStateCache { get(path: string): ReadFileState | undefined; set(path: string, state: ReadFileState): void; recordRead(path: string, mtimeMs: number): void; clear(): void }
 export interface ReadFileState { offset?: number; limit?: number; mtimeMs: number; isFullRead?: boolean }
@@ -14,6 +16,15 @@ export interface ToolUseContext {
   permissionContext?: unknown
   resultStore?: ToolResultStore
   planApproval?: (plan: string) => Promise<boolean>
+  correlation?: CorrelationContext
+  taskManager?: unknown
+  backgroundManager?: unknown
+  agentManager?: unknown
+  worktreeService?: unknown
+  messageBus?: unknown
+  teammateManager?: unknown
+  notify?: (message: string) => void
+  eventLogger?: EventLogger
 }
 export type PermissionResult = { behavior: 'allow' } | { behavior: 'deny'; message?: string } | { behavior: 'ask'; message?: string } | { behavior: 'passthrough' }
 export interface ToolResultReference { id: string; relativePath: string; byteLength: number; sha256: string; preview: string }

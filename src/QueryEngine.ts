@@ -1,4 +1,14 @@
 import type { BuiltTool, FileStateCache, ToolResultStore, ToolUseContext } from './Tool.js'
+import type { CorrelationContext } from './services/protocol/types.js'
+import type { TaskService } from './services/tasks/service.js'
+import type { WorktreeService } from './services/worktree/service.js'
+import type { AgentManager } from './services/agents/agentManager.js'
+import type { MessageBus } from './services/protocol/mailbox.js'
+import type { TeammateManager } from './services/agents/teammateManager.js'
+import type { McpRegistry } from './services/mcp/registry.js'
+import { BackgroundTaskManager } from './services/background/manager.js'
+import { BackgroundTaskStore } from './services/background/store.js'
+import { EventLogger } from './services/observability/events.js'
 import { assistantBlocksForNextTurn } from './Tool.js'
 import type { ApiClient } from './services/api/client.js'
 import type { Message, SystemBlock, Usage } from './services/api/types.js'
@@ -28,9 +38,10 @@ export interface QueryCallbacks {
 export interface QueryEngineOptions {
   client: ApiClient; tools: BuiltTool[]; systemPrompt?: string | SystemBlock[] | (() => string | SystemBlock[]); model: string; smallModel?: string; models?: Array<{ id: string; name?: string; maxOutputTokens?: number }>
   fallbackModel?: string; retryPolicy?: { maxAttempts?: number; baseDelayMs?: number; maxDelayMs?: number; jitterRatio?: number; retryStatuses?: readonly number[] }
+  agentId?: string; scopeSessionId?: string; beforeModel?: () => Promise<void>
   maxOutputTokens: number; maxTurns?: number; cwd: string; canUseTool: CanUseTool; createFileStateCache?: () => FileStateCache
   disableSessionPersistence?: boolean; sessionId?: string; startInPlanMode?: boolean
-  hooks?: HooksRegistry; permCtx?: PermissionContext; memorySettings?: { autoMemoryDirectory?: string }; autoCompact?: (messages: Message[]) => Promise<Message[] | null>
+  hooks?: HooksRegistry; permCtx?: PermissionContext; memorySettings?: { autoMemoryDirectory?: string }; incomingMessages?: () => Message[]; taskService?: TaskService; worktreeService?: WorktreeService; backgroundManager?: BackgroundTaskManager; loadBackgroundTasks?: boolean; agentManager?: AgentManager; messageBus?: MessageBus; teammateManager?: TeammateManager; mcpRegistry?: McpRegistry; eventLogger?: EventLogger; autoCompact?: (messages: Message[]) => Promise<Message[] | null>
 }
 
 function defaultFileState(): FileStateCache { return createFileStateCache() }
@@ -50,6 +61,8 @@ export class QueryEngine {
   private turnSequence = 0
   private sessionId: string | null = null
   private resultStore: ToolResultStore
+  private readonly backgroundManager: BackgroundTaskManager
+  private readonly eventLogger: EventLogger
   constructor(private readonly opts: QueryEngineOptions) {
     this.modelManager = new ModelManager(opts.models, opts.model)
     this.readFileState = opts.createFileStateCache?.() ?? defaultFileState()
@@ -60,9 +73,13 @@ export class QueryEngine {
       if (opts.sessionId) { this.sessionId = opts.sessionId; this.messages = loadSession(opts.cwd, opts.sessionId).messages }
       else this.sessionId = createSession(opts.cwd, opts.model).id
     }
-    this.resultStore = createToolResultStore(opts.cwd, this.sessionId ?? 'ephemeral')
+    this.resultStore = createToolResultStore(opts.cwd, this.scopeSessionId())
+    this.backgroundManager = opts.backgroundManager ?? new BackgroundTaskManager(new BackgroundTaskStore(opts.cwd), opts.loadBackgroundTasks !== false, this.scopeSessionId())
+    this.eventLogger = opts.eventLogger ?? new EventLogger(opts.cwd)
+    this.eventLogger.record('session_start', { sessionId: this.scopeSessionId(), turnId: 'startup', agentId: opts.agentId ?? 'lead' })
     void runHooks(this.hooks, 'SessionStart', { cwd: opts.cwd }).catch(() => undefined)
   }
+  private scopeSessionId(): string { return this.sessionId ?? this.opts.scopeSessionId ?? 'ephemeral' }
   private compactHooks(): CompactOptions['hooks'] {
     return {
       pre: async messages => { await runHooks(this.hooks, 'PreCompact', { cwd: this.opts.cwd, messages }) },
@@ -75,6 +92,13 @@ export class QueryEngine {
   getUsageTracker(): UsageTracker { return this.usageTracker }
   getModelManager(): ModelManager { return this.modelManager }
   getSessionId(): string | null { return this.sessionId }
+  getBackgroundManager(): BackgroundTaskManager { return this.backgroundManager }
+  getTaskService(): TaskService | undefined { return this.opts.taskService }
+  getWorktreeService(): WorktreeService | undefined { return this.opts.worktreeService }
+  listTasks(): string { const tasks = this.opts.taskService?.list(this.sessionId ?? undefined) ?? []; return tasks.length ? tasks.map(task => `${task.id} · ${task.status} · ${task.subject}${task.owner ? ` · ${task.owner}` : ''}`).join('\n') : 'No durable tasks.' }
+  listWorktrees(): string { const worktrees = this.opts.worktreeService?.list(this.sessionId ?? undefined) ?? []; return worktrees.length ? worktrees.map(worktree => `${worktree.id} · ${worktree.status} · ${worktree.name} · ${worktree.path}`).join('\n') : 'No worktrees.' }
+  listBackgroundTasks(): string { const tasks = this.backgroundManager.list(this.scopeSessionId()); return tasks.length ? tasks.map(task => `${task.id} · ${task.status} · ${task.command ?? task.toolName}`).join('\n') : 'No background tasks.' }
+  cancelBackgroundTask(id: string): string { return this.backgroundManager.cancel(id) ? `Cancelled background task ${id}.` : `Background task not found or already finished: ${id}` }
   async compactNow(): Promise<string> { const compacted = await compactConversation(this.messages, this.compactOptions()); if (!compacted) return 'Compaction failed or not enough conversation.'; const previous = this.messages.length; this.messages = compacted; if (this.sessionId) { try { replaceMessages(this.opts.cwd, this.sessionId, this.messages) } catch { /* persistence is non-fatal */ } } return `Compacted ${previous} messages → ${compacted.length}.` }
   async extractMemories(settings?: { autoMemoryDirectory?: string }): Promise<string> { const result = await extractMemories({ client: this.opts.client, smallModel: this.opts.smallModel ?? this.opts.model, messages: this.messages, cwd: this.opts.cwd, settings: settings ?? this.opts.memorySettings }); if (result.error) return `Memory extraction failed: ${result.error}`; return result.written.length ? `Wrote ${result.written.length} memor${result.written.length === 1 ? 'y' : 'ies'}: ${result.written.join(', ')}` : 'No new memories to save.' }
   getPermissionMode(): PermissionMode | null { return this.opts.permCtx?.mode ?? null }
@@ -94,18 +118,19 @@ export class QueryEngine {
     const previousLength = this.messages.length
     this.abortController = new AbortController()
     try {
-      const turnId = `${this.sessionId ?? 'ephemeral'}:${++this.turnSequence}`
+      const turnId = `${this.scopeSessionId()}:${++this.turnSequence}`
+      const correlation: CorrelationContext = { sessionId: this.scopeSessionId(), turnId, agentId: this.opts.agentId ?? 'lead' }
       this.messages = [...this.messages, { role: 'user', content: prompt }]
-      await runHooks(this.hooks, 'UserPromptSubmit', { cwd: this.opts.cwd, messages: this.messages, sessionId: this.sessionId, turnId }).catch(() => undefined)
+      await runHooks(this.hooks, 'UserPromptSubmit', { cwd: this.opts.cwd, messages: this.messages, sessionId: this.scopeSessionId(), turnId }).catch(() => undefined)
       this.setPlanApprovalCallback(callbacks.onPlanPresented)
-      const context: ToolUseContext = { abortController: this.abortController, readFileState: this.readFileState, cwd: this.opts.cwd, messages: this.messages, permissionContext: this.opts.permCtx, resultStore: this.resultStore, planApproval: async plan => { const approved = this.planCallback ? await this.planCallback(plan) : false; if (approved) this.planMode = false; return approved } }
+      const context: ToolUseContext = { abortController: this.abortController, readFileState: this.readFileState, cwd: this.opts.cwd, messages: this.messages, permissionContext: this.opts.permCtx, resultStore: this.resultStore, correlation, taskManager: this.opts.taskService, backgroundManager: this.backgroundManager, agentManager: this.opts.agentManager, messageBus: this.opts.messageBus, teammateManager: this.opts.teammateManager, worktreeService: this.opts.worktreeService, eventLogger: this.eventLogger, planApproval: async plan => { const approved = this.planCallback ? await this.planCallback(plan) : false; if (approved) this.planMode = false; return approved } }
       const result = await query(this.messages, {
-        client: this.opts.client, tools: this.toolsForCurrentMode(), systemPrompt: this.opts.systemPrompt ?? [], model: this.modelManager.getModel(), fallbackModel: this.opts.fallbackModel, retryPolicy: this.opts.retryPolicy, maxOutputTokens: this.modelManager.getMaxOutputTokens(this.opts.maxOutputTokens), maxTurns: this.opts.maxTurns ?? 50, context, canUseTool: this.opts.canUseTool, autoCompact: this.autoCompact, reactiveCompact: messages => reactiveCompactConversation(messages, this.compactOptions()), compact: messages => compactConversation(messages, this.compactOptions()), prepareContext: messages => prepareMessages(messages),
+        client: this.opts.client, tools: this.toolsForCurrentMode(), systemPrompt: this.opts.systemPrompt ?? [], model: this.modelManager.getModel(), correlation, fallbackModel: this.opts.fallbackModel, retryPolicy: this.opts.retryPolicy, maxOutputTokens: this.modelManager.getMaxOutputTokens(this.opts.maxOutputTokens), maxTurns: this.opts.maxTurns ?? 50, context, canUseTool: this.opts.canUseTool, backgroundManager: this.backgroundManager, backgroundSessionId: this.scopeSessionId(), beforeModel: this.opts.beforeModel, autoCompact: this.autoCompact, reactiveCompact: messages => reactiveCompactConversation(messages, this.compactOptions()), compact: messages => compactConversation(messages, this.compactOptions()), prepareContext: messages => prepareMessages(messages), onRecovery: info => this.eventLogger.record('recovery', correlation, info),
         onTextDelta: callbacks.onTextDelta, onToolStart: callbacks.onToolStart, onToolEnd: callbacks.onToolEnd,
-        onPreToolUse: async (name, input, toolUseId) => { const outcome = await runHooks(this.hooks, 'PreToolUse', { cwd: this.opts.cwd, toolName: name, input, sessionId: this.sessionId, turnId, toolUseId }, { failClosed: true }); return outcome },
-        onPostToolUse: async (name, input, result, isError, toolUseId) => { await runHooks(this.hooks, 'PostToolUse', { cwd: this.opts.cwd, toolName: name, input, toolResult: result, isError, sessionId: this.sessionId, turnId, toolUseId }) },
+        onPreToolUse: async (name, input, toolUseId) => { const outcome = await runHooks(this.hooks, 'PreToolUse', { cwd: this.opts.cwd, toolName: name, input, sessionId: this.scopeSessionId(), turnId, requestId: correlation.requestId, toolUseId }, { failClosed: true }); return outcome },
+        onPostToolUse: async (name, input, result, isError, toolUseId) => { await runHooks(this.hooks, 'PostToolUse', { cwd: this.opts.cwd, toolName: name, input, toolResult: result, isError, sessionId: this.scopeSessionId(), turnId, requestId: correlation.requestId, toolUseId }) },
         onUsage: (model, usage) => { this.usageTracker.add(model, usage); callbacks.onUsage?.(model, usage) },
-        injectMessages: () => { const queued = this.injectMessages(); if (callbacks.onUserMessage) queued.forEach(callbacks.onUserMessage); return queued },
+        injectMessages: () => { const queued = [...this.injectMessages(), ...(this.opts.incomingMessages?.() ?? [])]; if (callbacks.onUserMessage) queued.forEach(callbacks.onUserMessage); return queued },
       })
       this.messages = result.messages
       if (this.sessionId) { try { if (result.contextCompacted) replaceMessages(this.opts.cwd, this.sessionId, this.messages); else appendMessages(this.opts.cwd, this.sessionId, this.messages.slice(previousLength)) } catch { /* persistence is non-fatal */ } }
@@ -118,7 +143,7 @@ export class QueryEngine {
   getFinalText(): string { return getFinalText(this.messages) }
   setModel(id: string): string | null { return this.modelManager.setModel(id) }
   clearConversation(): void { this.messages = []; this.pendingQueue = []; this.readFileState.clear(); this.compactionState.consecutiveFailures = 0; this.compactionState.lastFailure = undefined }
-  newConversation(): void { this.clearConversation(); if (!this.opts.disableSessionPersistence) this.sessionId = createSession(this.opts.cwd, this.modelManager.getModel()).id; this.resultStore = createToolResultStore(this.opts.cwd, this.sessionId ?? 'ephemeral') }
+  newConversation(): void { this.clearConversation(); if (!this.opts.disableSessionPersistence) this.sessionId = createSession(this.opts.cwd, this.modelManager.getModel()).id; this.resultStore = createToolResultStore(this.opts.cwd, this.scopeSessionId()) }
   resumeSession(id: string): { count: number } | null { try { const loaded = loadSession(this.opts.cwd, id); if (!loaded.meta && loaded.messages.length === 0) return null; this.messages = loaded.messages; this.sessionId = id; this.resultStore = createToolResultStore(this.opts.cwd, id); this.compactionState.consecutiveFailures = 0; this.compactionState.lastFailure = undefined; this.readFileState.clear(); return { count: this.messages.length } } catch { return null } }
-  async shutdown(): Promise<void> { await runHooks(this.hooks, 'SessionEnd', { cwd: this.opts.cwd, messages: this.messages }).catch(() => undefined) }
+  async shutdown(): Promise<void> { await this.backgroundManager.shutdown(); await this.opts.teammateManager?.shutdownAll(this.sessionId ?? undefined); await this.opts.mcpRegistry?.disconnect(); await runHooks(this.hooks, 'SessionEnd', { cwd: this.opts.cwd, messages: this.messages, sessionId: this.scopeSessionId() }).catch(() => undefined) }
 }

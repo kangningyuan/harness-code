@@ -68,7 +68,8 @@ export function App({ engine, cwd, costTracker, config, memorySettings, permAskH
   const [spinnerFrame, setSpinnerFrame] = useState(0)
   const [ringFrame, setRingFrame] = useState(0)
   const [activity, setActivity] = useState('thinking')
-  const [todos, setTodos] = useState<TodoList>(getCurrentTodos())
+  const todoSessionId = engine.getSessionId() ?? 'ephemeral'
+  const [todos, setTodos] = useState<TodoList>(getCurrentTodos(todoSessionId))
   const [pendingPerm, setPendingPerm] = useState<{ tool: string; input: unknown; reason: string } | null>(null)
   const permResolver = useRef<((approved: boolean) => void) | null>(null)
   const [pendingPlan, setPendingPlan] = useState<string | null>(null)
@@ -80,8 +81,10 @@ export function App({ engine, cwd, costTracker, config, memorySettings, permAskH
   const setCursor = (value: number) => { cursorRef.current = value; setCursorPos(value) }
   const append = (item: Omit<Entry, 'id'>) => setTranscript(items => [...items, entry(item.role, item.text, item.toolName)])
   const rebuildTranscript = () => { setTranscript(entriesFromMessages(engine.getMessages())); setTranscriptKey(key => key + 1); forceRefresh(value => value + 1) }
+  const backgroundManager = engine.getBackgroundManager?.()
 
-  useEffect(() => { const unsubscribe = subscribeTodos(setTodos); return unsubscribe }, [])
+  useEffect(() => { const unsubscribe = subscribeTodos(setTodos, todoSessionId); return unsubscribe }, [todoSessionId])
+  useEffect(() => backgroundManager ? backgroundManager.subscribe(event => { if (event.type !== 'started') append({ role: 'tool', text: event.notification }); forceRefresh(value => value + 1) }) : undefined, [backgroundManager])
   useEffect(() => { if (!loading) { setSpinnerFrame(0); return undefined }; const id = setInterval(() => setSpinnerFrame(frame => (frame + 1) % SPINNER_FRAMES.length), 80); return () => clearInterval(id) }, [loading])
   useEffect(() => { const id = setInterval(() => setRingFrame(frame => (frame + 1) % 18), 120); return () => clearInterval(id) }, [])
   useEffect(() => {
@@ -98,7 +101,7 @@ export function App({ engine, cwd, costTracker, config, memorySettings, permAskH
   const exportTranscript = () => { const id = engine.getSessionId() ?? 'current'; const path = join(cwd, `harness-export-${id}.md`); const lines = [`# harness-code transcript (${id})`, '', ...transcript.filter(item => item.role !== 'banner').map(item => `${item.role === 'user' ? '## User' : item.role === 'tool' ? '## Tool' : '## Assistant'}\n\n${item.text}\n`)]; writeFileSync(path, lines.join('\n'), 'utf8'); return `Exported transcript to ${path}` }
   const listModels = () => modelEntries.length ? modelEntries.map((model, index) => `${model.id === footer.model ? '▸ ' : '  '}${index + 1}. ${model.id}${model.name ? ` — ${model.name}` : ''}`).join('\n') : `Current model: ${footer.model}`
   const commandContext = () => ({
-    cwd, clearConversation: () => { engine.clearConversation(); setTranscript([entry('banner', '')]); setTranscriptKey(key => key + 1) }, compact: () => engine.compactNow(), getModel: () => footer.model, setModel: (id: string) => engine.setModel(id), listModels, getConfigSummary: () => `baseURL: ${config.baseURL}\napiKey: ${redactApiKey(config.apiKey)}\nmodel: ${footer.model}\nsmallModel: ${config.smallModel}\nmaxOutputTokens: ${config.maxOutputTokens}`, getCostSummary: () => formatTotalCost(costTracker), listSkills: undefined, getMemoryPrompt: () => loadMemoryPrompt(cwd, memorySettings), extractMemories: () => engine.extractMemories(), listHooks: () => 'Hooks are loaded from project settings.', listSessions: () => listSessions(cwd).slice(0, 20).map(session => `${session.id}  ${session.messageCount} msgs  ${new Date(session.updatedAt).toLocaleString()}`).join('\n') || 'No sessions found', resumeSession: (id: string) => { const result = engine.resumeSession(id); if (result) rebuildTranscript(); return result }, exportTranscript, enterPlanMode: () => engine.enterPlanMode(), isPlanMode: () => engine.isPlanMode(), setPermissionMode: (mode: 'default'|'auto'|'bypassPermissions') => engine.setPermissionMode(mode), getPermissionMode: () => engine.getPermissionMode(), newConversation: () => { engine.newConversation(); setTranscript([entry('banner', '')]); setTranscriptKey(key => key + 1) }, openHistory: showHistory,
+    cwd, clearConversation: () => { engine.clearConversation(); setTranscript([entry('banner', '')]); setTranscriptKey(key => key + 1) }, compact: () => engine.compactNow(), getModel: () => footer.model, setModel: (id: string) => engine.setModel(id), listModels, getConfigSummary: () => `baseURL: ${config.baseURL}\napiKey: ${redactApiKey(config.apiKey)}\nmodel: ${footer.model}\nsmallModel: ${config.smallModel}\nmaxOutputTokens: ${config.maxOutputTokens}`, getCostSummary: () => formatTotalCost(costTracker), listSkills: undefined, getMemoryPrompt: () => loadMemoryPrompt(cwd, memorySettings), extractMemories: () => engine.extractMemories(), listHooks: () => 'Hooks are loaded from project settings.', listSessions: () => listSessions(cwd).slice(0, 20).map(session => `${session.id}  ${session.messageCount} msgs  ${new Date(session.updatedAt).toLocaleString()}`).join('\n') || 'No sessions found', resumeSession: (id: string) => { const result = engine.resumeSession(id); if (result) rebuildTranscript(); return result }, listTasks: () => engine.listTasks(), listWorktrees: () => engine.listWorktrees(), listBackgroundTasks: () => engine.listBackgroundTasks(), cancelBackgroundTask: (id: string) => engine.cancelBackgroundTask(id), exportTranscript, enterPlanMode: () => engine.enterPlanMode(), isPlanMode: () => engine.isPlanMode(), setPermissionMode: (mode: 'default'|'auto'|'bypassPermissions') => engine.setPermissionMode(mode), getPermissionMode: () => engine.getPermissionMode(), newConversation: () => { engine.newConversation(); setTranscript([entry('banner', '')]); setTranscriptKey(key => key + 1) }, openHistory: showHistory,
   })
 
   const runQuery = async (prompt: string) => {

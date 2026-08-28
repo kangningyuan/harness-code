@@ -2,6 +2,7 @@ import type { BuiltTool, ToolResult, ToolUseContext } from '../Tool.js'
 import { textToolResult } from '../Tool.js'
 import { formatToolResultReference } from '../services/tool-results/store.js'
 import type { Message, ToolResultBlock, ToolUseBlock } from '../services/api/types.js'
+import type { BackgroundTaskManager } from '../services/background/manager.js'
 
 export interface CanUseToolResult { behavior: 'allow' | 'deny'; message?: string }
 export type CanUseTool = (tool: BuiltTool, input: Record<string, unknown>, options?: { hookApproved?: boolean; signal?: AbortSignal }) => Promise<CanUseToolResult>
@@ -12,6 +13,7 @@ export interface RunToolsOptions {
   onPreToolUse?: (name: string, input: Record<string, unknown>, toolUseId?: string) => Promise<{ decision?: 'block'|'approve'; reason?: string }>
   onPostToolUse?: (name: string, input: Record<string, unknown>, result: unknown, isError: boolean, toolUseId?: string) => Promise<void>
   maxResultSizeChars?: number
+  backgroundManager?: BackgroundTaskManager
 }
 
 function asRecord(input: unknown): Record<string, unknown> { return input && typeof input === 'object' && !Array.isArray(input) ? input as Record<string, unknown> : {} }
@@ -106,9 +108,35 @@ async function executeOne(block: ToolUseBlock, tool: BuiltTool | undefined, cont
     catch (error) { return errorBlock(block.id, `Permission check failed: ${error instanceof Error ? error.message : String(error)}`) }
     if (permission.behavior === 'deny') return errorBlock(block.id, `Permission denied${permission.message ? `: ${permission.message}` : ''}`)
   }
+  if (options.backgroundManager?.shouldRun(tool.name, input)) {
+    try {
+      try { options.onToolStart?.(tool.name, input) } catch { /* UI callbacks must not block tools */ }
+      const baseCorrelation = context.correlation ?? { sessionId: 'ephemeral', turnId: 'unknown' }
+      const task = options.backgroundManager.start({
+        correlation: { ...baseCorrelation, toolUseId: block.id },
+        toolName: tool.name,
+        command: typeof input.command === 'string' ? input.command : undefined,
+        cwd: context.cwd,
+        run: async signal => {
+          const controller = new AbortController()
+          const abort = () => controller.abort()
+          signal.addEventListener('abort', abort, { once: true })
+          if (signal.aborted) controller.abort()
+          try { const toolContext = { ...context, abortController: controller, correlation: context.correlation ? { ...context.correlation, toolUseId: block.id } : context.correlation }; return { result: await tool.call(input, toolContext), context: toolContext } }
+          finally { signal.removeEventListener('abort', abort) }
+        },
+        onResult: (backgroundResult, completedTask) => {
+          const failed = backgroundResult.isError === true
+          try { options.onToolEnd?.(tool.name, input, backgroundResult, failed) } catch { /* UI callbacks must not block tasks */ }
+          try { const post = options.onPostToolUse?.(tool.name, input, backgroundResult, failed, completedTask.toolUseId); void post?.catch(() => undefined) } catch { /* observe-only */ }
+        },
+      })
+      return errorOrNormalBlock(block.id, `[Background task ${task.id} started; completion will arrive as a task notification.]`, false)
+    } catch (error) { return errorBlock(block.id, `Failed to start background task: ${error instanceof Error ? error.message : String(error)}`) }
+  }
   try { options.onToolStart?.(tool.name, input) } catch { /* UI callbacks must not block tools */ }
   let result: ToolResult
-  try { result = await tool.call(input, context) }
+  try { const toolContext = { ...context, correlation: context.correlation ? { ...context.correlation, toolUseId: block.id } : context.correlation }; result = await tool.call(input, toolContext) }
   catch (error) { result = { data: null, result: error instanceof Error ? error.message : String(error), isError: true } }
   const isError = result.isError === true
   try { options.onToolEnd?.(tool.name, input, result, isError) } catch { /* UI callbacks must not block tools */ }

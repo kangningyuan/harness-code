@@ -1,4 +1,5 @@
 import type { ApiConfig, MessageCreateParams, ModelResult, StreamEvent } from './types.js'
+import { newRequestId } from '../protocol/ids.js'
 import { consumeSse, RequestAbortedError, StreamAccumulator, StreamIncompleteError } from './stream.js'
 
 export { RequestAbortedError }
@@ -19,7 +20,7 @@ export class ApiError extends Error {
   get isRetryable(): boolean { return this.status === 408 || this.status === 409 || this.status === 429 || (this.status >= 500 && this.status <= 599) || this.code === 'overloaded' || this.code === 'rate_limit_error' }
 }
 
-export interface CallModelOptions { onEvent?: (event: StreamEvent) => void; signal?: AbortSignal }
+export interface CallModelOptions { onEvent?: (event: StreamEvent) => void; signal?: AbortSignal; requestId?: string; sessionId?: string; turnId?: string }
 export interface CallOnceOptions { signal?: AbortSignal }
 
 function endpoint(baseURL: string): string {
@@ -48,6 +49,7 @@ export class ApiClient {
 
   async callModel(params: MessageCreateParams, options: CallModelOptions = {}): Promise<ModelResult> {
     const controller = new AbortController()
+    const requestId = options.requestId ?? newRequestId()
     let timedOut = false
     const timer = setTimeout(() => { timedOut = true; controller.abort() }, this.config.timeoutMs)
     const onAbort = () => controller.abort()
@@ -62,6 +64,9 @@ export class ApiClient {
           'x-api-key': this.config.apiKey ?? '',
           authorization: `Bearer ${this.config.apiKey ?? ''}`,
           'anthropic-version': '2023-06-01',
+          'x-harness-request-id': requestId,
+          ...(options.sessionId ? { 'x-harness-session-id': options.sessionId } : {}),
+          ...(options.turnId ? { 'x-harness-turn-id': options.turnId } : {}),
         },
         body: JSON.stringify({ ...params, stream: true }),
         signal: controller.signal,
@@ -72,7 +77,8 @@ export class ApiClient {
         const parsed = jsonError(body)
         throw new ApiError(parsed.message, response.status, parsed.code, parseRetryAfter(response.headers.get('retry-after')))
       }
-      return await consumeSse(response, new StreamAccumulator(), options.onEvent, options.signal, { strict: this.config.strictStreamProtocol })
+      const result = await consumeSse(response, new StreamAccumulator(), options.onEvent, options.signal, { strict: this.config.strictStreamProtocol })
+      return { ...result, requestId, remoteRequestId: response.headers.get('x-request-id') ?? undefined }
     } catch (error) {
       if (options.signal?.aborted) throw new RequestAbortedError()
       if (timedOut) { if (error instanceof StreamIncompleteError && error.partial) throw error; throw new RequestTimeoutError() }

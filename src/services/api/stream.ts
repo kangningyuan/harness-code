@@ -27,9 +27,13 @@ export class StreamAccumulator {
   private toolBlock: ToolUseBlock | undefined
   private started = false
   private stopped = false
+  private lastEventId: string | undefined
+  private eventCount = 0
 
   add(event: StreamEvent): void {
     this.started = true
+    this.eventCount++
+    if (typeof event.eventId === 'string') this.lastEventId = event.eventId
     if (event.type === 'message_start') {
       const usage = event.message?.usage as Record<string, unknown> | undefined
       this.usage = usageFrom(usage)
@@ -82,18 +86,21 @@ export class StreamAccumulator {
   }
 
   finalize(): ModelResult {
-    return { content: this.content.filter((block): block is ContentBlock => Boolean(block)), stopReason: this.stopReason, usage: this.usage, streamComplete: this.stopped }
+    return { content: this.content.filter((block): block is ContentBlock => Boolean(block)), stopReason: this.stopReason, usage: this.usage, streamComplete: this.stopped, lastEventId: this.lastEventId, eventCount: this.eventCount }
   }
   hasContent(): boolean { return this.content.length > 0 || this.started }
   hasStopped(): boolean { return this.stopped }
 }
 
 export function parseSseLines(text: string, onEvent: (event: StreamEvent) => void): void {
+  let eventId: string | undefined
   for (const line of text.split(/\r?\n/)) {
+    if (line.startsWith('id:')) { eventId = line.slice(3).trim(); continue }
     if (!line.startsWith('data:')) continue
     const data = line.slice(5).trim()
-    if (!data || data === '[DONE]') continue
-    try { onEvent(JSON.parse(data) as StreamEvent) } catch { /* ignore malformed SSE data */ }
+    if (!data || data === '[DONE]') { eventId = undefined; continue }
+    try { onEvent({ ...(JSON.parse(data) as StreamEvent), eventId: eventId ?? (JSON.parse(data) as StreamEvent).eventId }); } catch { /* ignore malformed SSE data */ }
+    eventId = undefined
   }
 }
 
@@ -102,12 +109,14 @@ export async function consumeSse(response: Response, accumulator: StreamAccumula
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
+  let pendingEventId: string | undefined
   const consumeLine = (line: string) => {
+    if (line.startsWith('id:')) { pendingEventId = line.slice(3).trim(); return }
     if (!line.startsWith('data:')) return
     const data = line.slice(5).trim()
-    if (!data || data === '[DONE]') return
+    if (!data || data === '[DONE]') { pendingEventId = undefined; return }
     let event: StreamEvent
-    try { event = JSON.parse(data) as StreamEvent } catch (error) {
+    try { event = { ...(JSON.parse(data) as StreamEvent), eventId: pendingEventId ?? (JSON.parse(data) as StreamEvent).eventId }; pendingEventId = undefined } catch (error) {
       if (options.strict) throw new StreamProtocolError(`Malformed SSE data: ${error instanceof Error ? error.message : String(error)}`, 'malformed_sse')
       return
     }

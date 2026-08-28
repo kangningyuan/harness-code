@@ -48,6 +48,10 @@ export interface ModelResult {
   usage?: Usage
   id?: string
   model?: string
+  requestId?: string
+  remoteRequestId?: string
+  lastEventId?: string
+  eventCount?: number
   partial?: boolean
   interrupted?: boolean
   streamComplete?: boolean
@@ -56,6 +60,7 @@ export interface ModelResult {
 
 export interface StreamEvent {
   type: string
+  eventId?: string
   index?: number
   message?: { content?: ContentBlock[]; usage?: Record<string, unknown>; stop_reason?: string | null }
   content_block?: ContentBlock

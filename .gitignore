@@ -32,6 +32,7 @@ build/
 
 # 运行时数据
 .harness-code/tool-results/
+.harness-code/worktrees/
 *.pid
 *.seed
 *.pid.lock

@@ -5,6 +5,9 @@ import { createRecoveryState, retryModelCall, type RetryPolicy } from './query/r
 import type { ContentBlock, Message, ModelResult, ToolUseBlock, Usage } from './services/api/types.js'
 import { runTools, type CanUseTool, type RunToolsOptions } from './query/runTools.js'
 import { yieldMissingToolResultBlocks } from './query/abort.js'
+import type { BackgroundTaskManager } from './services/background/manager.js'
+import { newRequestId } from './services/protocol/ids.js'
+import type { CorrelationContext } from './services/protocol/types.js'
 
 export type QueryExitReason = 'completed' | 'aborted_streaming' | 'aborted_tools' | 'max_turns' | 'prompt_too_long' | 'error'
 export type SystemPromptValue = string | Array<{ type: 'text'; text: string; cache_control?: { type: 'ephemeral' } }>
@@ -14,12 +17,16 @@ export interface QueryDeps {
   tools: BuiltTool[]
   systemPrompt: SystemPromptValue | (() => SystemPromptValue)
   model: string
+  correlation?: CorrelationContext
   fallbackModel?: string
   retryPolicy?: Partial<RetryPolicy>
   maxOutputTokens: number
   maxTurns: number
   context: ToolUseContext
   canUseTool: CanUseTool
+  backgroundManager?: BackgroundTaskManager
+  backgroundSessionId?: string
+  beforeModel?: () => Promise<void>
   autoCompact?: (messages: Message[]) => Promise<Message[] | null>
   reactiveCompact?: (messages: Message[]) => Promise<Message[] | null>
   compact?: (messages: Message[]) => Promise<Message[] | null>
@@ -51,7 +58,10 @@ export async function query(initialMessages: Message[], deps: QueryDeps): Promis
   while (true) {
     if (deps.context.abortController.signal.aborted) return { reason: 'aborted_streaming', messages, contextCompacted }
     if (turns >= deps.maxTurns) return { reason: 'max_turns', messages, contextCompacted }
+    try { await deps.beforeModel?.() } catch (error) { return { reason: 'error', messages, error: errorMessage(error), contextCompacted } }
 
+    const notifications = deps.backgroundManager?.drainNotifications(deps.backgroundSessionId) ?? []
+    if (notifications.length) messages = [...messages, ...notifications.map(notification => ({ role: 'user' as const, content: notification }))]
     const queued = deps.injectMessages?.() ?? []
     if (queued.length) messages = [...messages, ...queued]
     if (deps.prepareContext) {
@@ -72,16 +82,25 @@ export async function query(initialMessages: Message[], deps: QueryDeps): Promis
       }
     }
 
-    const modelResult = await retryModelCall(model => deps.client.callModel({
-      model,
-      messages,
-      system: systemValue(deps.systemPrompt),
-      tools: deps.tools.map(tool => ({ name: tool.name, description: tool.prompt(), input_schema: tool.jsonSchema })),
-      max_tokens: outputOverride ?? deps.maxOutputTokens,
+    let requestId = newRequestId()
+    deps.context.eventLogger?.record('model_request_start', deps.correlation, { model: recovery.currentModel })
+    const modelResult = await retryModelCall(model => {
+      requestId = newRequestId()
+      if (deps.correlation) deps.correlation.requestId = requestId
+      return deps.client.callModel({
+        model,
+        messages,
+        system: systemValue(deps.systemPrompt),
+        tools: deps.tools.map(tool => ({ name: tool.name, description: tool.prompt(), input_schema: tool.jsonSchema })),
+        max_tokens: outputOverride ?? deps.maxOutputTokens,
+      }, {
+        onEvent: event => { deps.onStreamEvent?.(event); if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') deps.onTextDelta?.(event.delta.text ?? '') },
+        signal: deps.context.abortController.signal,
+        requestId,
+        sessionId: deps.correlation?.sessionId,
+        turnId: deps.correlation?.turnId,
+      })
     }, {
-      onEvent: event => { deps.onStreamEvent?.(event); if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') deps.onTextDelta?.(event.delta.text ?? '') },
-      signal: deps.context.abortController.signal,
-    }), {
       state: recovery,
       policy: deps.retryPolicy,
       fallbackModel: deps.fallbackModel,
@@ -91,6 +110,7 @@ export async function query(initialMessages: Message[], deps: QueryDeps): Promis
 
     if ('error' in modelResult) {
       const error = modelResult.error
+      deps.context.eventLogger?.record('model_request_error', deps.correlation, { error: errorMessage(error), code: error instanceof Error && 'code' in error ? String((error as { code?: unknown }).code ?? '') : undefined })
       if (error instanceof RequestAbortedError) return { reason: 'aborted_streaming', messages, contextCompacted }
       if (error instanceof ApiError && error.isPromptTooLong) {
         if (!recovery.reactiveCompactUsed && (deps.reactiveCompact ?? deps.compact ?? deps.autoCompact)) {
@@ -121,6 +141,7 @@ export async function query(initialMessages: Message[], deps: QueryDeps): Promis
     }
 
     const result = modelResult.value
+    deps.context.eventLogger?.record('model_request_end', deps.correlation ? { ...deps.correlation, requestId: result.requestId, attempt: recovery.networkAttempts } : undefined, { model: modelResult.model, stopReason: result.stopReason, partial: result.partial })
     turns++
     if (result.usage) deps.onUsage?.(modelResult.model, result.usage)
     if (result.interrupted || result.partial) return { reason: result.interrupted ? 'aborted_streaming' : 'error', messages, error: result.interrupted ? 'Request interrupted' : 'Incomplete model response', errorCode: result.interrupted ? 'aborted' : 'incomplete_stream', partial: result, contextCompacted }
@@ -149,7 +170,7 @@ export async function query(initialMessages: Message[], deps: QueryDeps): Promis
     const toolUse = assistantBlocks.filter((block): block is ToolUseBlock => block.type === 'tool_use')
     if (!toolUse.length) return { reason: 'completed', messages, contextCompacted }
     try {
-      const toolMessages = await runTools(toolUse, deps.tools, deps.context, { ...deps.runToolsOptions, canUseTool: deps.canUseTool, onPreToolUse: deps.onPreToolUse, onPostToolUse: deps.onPostToolUse, onToolStart: deps.onToolStart, onToolEnd: deps.onToolEnd })
+      const toolMessages = await runTools(toolUse, deps.tools, deps.context, { ...deps.runToolsOptions, backgroundManager: deps.backgroundManager, canUseTool: deps.canUseTool, onPreToolUse: deps.onPreToolUse, onPostToolUse: deps.onPostToolUse, onToolStart: deps.onToolStart, onToolEnd: deps.onToolEnd })
       messages = [...messages, ...toolMessages]
     } catch (error) {
       const synthetic = yieldMissingToolResultBlocks(assistantBlocks, [])
